@@ -92,8 +92,15 @@ func parseRecipient(s string) (*mail.Address, error) {
 }
 
 func (r recipients) parse(msg *outboundMessage) error {
-	if len(r.To)+len(r.Cc)+len(r.Bcc) > maxRecipients || len(r.To) == 0 {
+	if len(r.To) == 0 {
 		return errors.New("provide at least one To recipient and no more than 25 recipients in total")
+	}
+	return r.parseLists(msg)
+}
+
+func (r recipients) parseLists(msg *outboundMessage) error {
+	if len(r.To)+len(r.Cc)+len(r.Bcc) > maxRecipients {
+		return errors.New("provide no more than 25 recipients in total")
 	}
 	for _, field := range []struct {
 		values []string
@@ -167,6 +174,10 @@ func safeOriginalSubject(prefix, subject string) string {
 }
 
 func encodeMessage(from string, msg outboundMessage) ([]byte, string, error) {
+	return encodeMIME(from, msg, false)
+}
+
+func encodeMIME(from string, msg outboundMessage, draft bool) ([]byte, string, error) {
 	var h mimemail.Header
 	h.SetDate(time.Now())
 	_, domain, _ := strings.Cut(from, "@")
@@ -181,6 +192,9 @@ func encodeMessage(from string, msg outboundMessage) ([]byte, string, error) {
 	h.SetAddressList("To", msg.to)
 	if len(msg.cc) != 0 {
 		h.SetAddressList("Cc", msg.cc)
+	}
+	if draft {
+		h.SetAddressList("Bcc", msg.bcc)
 	}
 	h.SetSubject(msg.subject)
 	if msg.replyID != "" {

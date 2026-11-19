@@ -216,6 +216,9 @@ func newServer(service *mailService) *mcp.Server {
 	addMailboxReadTools(s, service)
 	addThreadTool(s, service)
 	addMailboxWriteTools(s, service)
+	addOrganizeTools(s, service)
+	addFolderTools(s, service)
+	addDraftTools(s, service)
 	addDeliveryTools(s, service)
 	mcp.AddTool(s, tool("download_attachment", "Download one attachment from list_attachments as Base64, without changing read status."), func(ctx context.Context, _ *mcp.CallToolRequest, in attachmentInput) (*mcp.CallToolResult, attachmentDownload, error) {
 		var out attachmentDownload

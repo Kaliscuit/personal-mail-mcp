@@ -183,6 +183,50 @@ func TestIMAPReadAndWrite(t *testing.T) {
 	if err != nil || len(p.Messages) != 1 {
 		t.Fatalf("archived messages: %+v, %v", p, err)
 	}
+	if err := c.Create("Projects", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if err := changeFolder(c, "Projects", "Reading", false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Create("Empty", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if err := changeFolder(c, "Empty", "MCP-Retired-test", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := changeFolder(c, "Archive", "NoArchive", false, []string{"archive"}); err == nil {
+		t.Fatal("configured archive was renamed")
+	}
+	source := messageInput{Folder: "INBOX", UID: 1, UIDValidity: page.UIDValidity}
+	uids := []imap.UID{1, 2}
+	changes, err := (flagBatchInput{Seen: &unread, Starred: &starred, AddKeywords: []string{"project-abc"}}).flags()
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updateFlags(c, source, uids, changes)
+	if err != nil || len(updated.Confirmed) != 2 || len(updated.Unconfirmed) != 0 {
+		t.Fatalf("bulk flags: %+v, %v", updated, err)
+	}
+	copied, err := copyMessage(c, source, "Reading")
+	if err != nil || copied.UID == 0 || copied.UIDValidity == 0 {
+		t.Fatalf("copy: %+v, %v", copied, err)
+	}
+	if err := changeFolder(c, "Reading", "ShouldKeep", true, nil); err == nil {
+		t.Fatal("retired a non-empty folder")
+	}
+	if _, err := moveSet(c, source, []imap.UID{1, 99}, archive); err == nil {
+		t.Fatal("batch move should reject a missing source before moving anything")
+	}
+	if _, err := moveSet(c, source, uids, archive); err != nil {
+		t.Fatal(err)
+	}
+	for folder, want := range map[string]uint32{"INBOX": 0, "Archive": 3, "Reading": 1, "MCP-Retired-test": 0} {
+		status, err := readMailboxStatus(c, folder)
+		if err != nil || status.Messages != want {
+			t.Fatalf("counts %s: %+v, %v", folder, status, err)
+		}
+	}
 }
 
 func TestSpecialUseFolderDiscovery(t *testing.T) {

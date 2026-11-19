@@ -128,13 +128,13 @@ func TestMCPToolCalls(t *testing.T) {
 	var names []string
 	for _, tool := range tools.Tools {
 		names = append(names, tool.Name)
-		readOnly := slices.Contains([]string{"download_attachment", "get_mailbox_status", "get_thread", "list_accounts", "list_attachments", "list_folders", "read_message", "search_mailboxes", "search_messages"}, tool.Name)
+		readOnly := slices.Contains([]string{"download_attachment", "get_mailbox_status", "get_thread", "list_accounts", "list_attachments", "list_drafts", "list_folders", "read_message", "search_mailboxes", "search_messages"}, tool.Name)
 		if tool.Annotations == nil || tool.Annotations.ReadOnlyHint != readOnly {
 			t.Fatalf("tool %s has incorrect read-only annotation", tool.Name)
 		}
 	}
 	slices.Sort(names)
-	if !slices.Equal(names, []string{"archive_message", "delete_message", "download_attachment", "forward_message", "get_mailbox_status", "get_thread", "list_accounts", "list_attachments", "list_folders", "move_message", "read_message", "reply_message", "search_mailboxes", "search_messages", "send_message", "set_message_read"}) {
+	if !slices.Equal(names, []string{"archive_message", "archive_messages", "copy_message", "create_folder", "delete_message", "discard_draft", "download_attachment", "forward_message", "get_mailbox_status", "get_thread", "list_accounts", "list_attachments", "list_drafts", "list_folders", "move_message", "move_messages", "read_message", "rename_folder", "reply_message", "retire_empty_folder", "save_draft", "search_mailboxes", "search_messages", "send_message", "set_message_read", "update_message_flags"}) {
 		t.Fatalf("unexpected tools: %v", names)
 	}
 	result, err := conn.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_accounts"})
@@ -161,6 +161,8 @@ func TestMCPToolCalls(t *testing.T) {
 		args map[string]any
 	}{
 		{"set_message_read", map[string]any{"account": "absent", "uid": 1, "uid_validity": 1, "seen": false}},
+		{"update_message_flags", map[string]any{"account": "absent", "uids": []int{1, 2}, "uid_validity": 1, "starred": false}},
+		{"rename_folder", map[string]any{"account": "absent", "folder": "Source", "destination": "Destination"}},
 		{"send_message", map[string]any{"account": "absent", "subject": "test", "to": []string{"recipient@example.net"}, "body": "test"}},
 	} {
 		result, err := conn.CallTool(t.Context(), &mcp.CallToolParams{Name: call.name, Arguments: call.args})

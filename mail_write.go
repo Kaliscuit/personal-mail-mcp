@@ -34,7 +34,7 @@ func writeTool(name, description string, destructive, idempotent, external bool)
 
 func selectForWrite(c *imapclient.Client, in messageInput) error {
 	selected, err := c.Select(in.Folder, nil).Wait()
-	if err != nil || selected.UIDValidity == 0 {
+	if err != nil || selected.UIDValidity == 0 || selected.ReadOnly {
 		return errors.New("could not open source folder for writing")
 	}
 	if selected.UIDValidity != in.UIDValidity {
@@ -101,27 +101,9 @@ func specialFolder(c *imapclient.Client, attr imap.MailboxAttr) (string, error) 
 }
 
 func moveMessage(c *imapclient.Client, in messageInput, dest string) (moveResult, error) {
-	if in.Folder == dest || (strings.EqualFold(in.Folder, "INBOX") && strings.EqualFold(dest, "INBOX")) {
-		return moveResult{}, errors.New("message is already in the destination folder")
-	}
-	if err := selectForWrite(c, in); err != nil {
+	data, err := moveSet(c, in, []imap.UID{in.UID}, dest)
+	if err != nil {
 		return moveResult{}, err
-	}
-	uid := imap.UIDSetNum(in.UID)
-	found, err := c.UIDSearch(&imap.SearchCriteria{UID: []imap.UIDSet{uid}}, nil).Wait()
-	if err != nil {
-		return moveResult{}, errors.New("could not verify the source message")
-	}
-	if uids, ok := found.All.(imap.UIDSet); !ok || !uids.Contains(in.UID) {
-		return moveResult{}, errors.New("message not found in the source folder")
-	}
-	// The library otherwise falls back to COPY, STORE and potentially a folder-wide EXPUNGE.
-	if !c.Caps().Has(imap.CapMove) {
-		return moveResult{}, errors.New("mail server does not support safe IMAP MOVE")
-	}
-	data, err := c.Move(uid, dest).Wait()
-	if err != nil {
-		return moveResult{}, errors.New("move was not confirmed; check both folders before retrying")
 	}
 	out := moveResult{Destination: dest}
 	src, srcOK := data.SourceUIDs.(imap.UIDSet)

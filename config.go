@@ -31,6 +31,7 @@ type account struct {
 	Tenant        string `json:"tenant,omitempty"`
 	OAuthFile     string `json:"oauth_file,omitempty"`
 	ArchiveFolder string `json:"archive_folder,omitempty"`
+	DraftsFolder  string `json:"drafts_folder,omitempty"`
 	TrashFolder   string `json:"trash_folder,omitempty"`
 	SMTPAddress   string `json:"smtp_address,omitempty"`
 	SMTPTLS       string `json:"smtp_tls,omitempty"`
@@ -92,13 +93,18 @@ func loadConfig(path string) (config, error) {
 		if strings.TrimSpace(name) == "" || strings.TrimSpace(a.Username) == "" || !ok {
 			return c, fmt.Errorf("account %q requires a username and valid provider", name)
 		}
-		for _, folder := range []string{a.ArchiveFolder, a.TrashFolder} {
-			if _, err := folderName(folder); err != nil || strings.EqualFold(folder, "INBOX") {
-				return c, fmt.Errorf("account %q has an invalid archive or trash folder", name)
+		usedFolders := map[string]bool{}
+		for _, folder := range []string{a.ArchiveFolder, a.TrashFolder, a.DraftsFolder} {
+			if folder == "" {
+				continue
 			}
-		}
-		if a.ArchiveFolder != "" && a.ArchiveFolder == a.TrashFolder {
-			return c, fmt.Errorf("account %q must use distinct archive and trash folders", name)
+			if _, err := folderName(folder); err != nil || strings.EqualFold(folder, "INBOX") {
+				return c, fmt.Errorf("account %q has an invalid archive, trash or drafts folder", name)
+			}
+			if usedFolders[folder] {
+				return c, fmt.Errorf("account %q must use distinct archive, trash and drafts folders", name)
+			}
+			usedFolders[folder] = true
 		}
 		if a.Address == "" {
 			a.Address = addr
