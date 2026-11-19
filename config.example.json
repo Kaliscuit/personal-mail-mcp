@@ -6,7 +6,9 @@
     "personal-gmail": {
       "provider": "gmail",
       "username": "you@gmail.com",
-      "password_file": "secrets/personal-gmail"
+      "password_file": "secrets/personal-gmail",
+      "smtp_address": "smtp.gmail.com:465",
+      "smtp_tls": "implicit"
     }
   }
 }

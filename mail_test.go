@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net"
@@ -161,6 +162,50 @@ func TestIMAPReadAndWrite(t *testing.T) {
 	p, err := findMessages(c, q, criteria)
 	if err != nil || len(p.Messages) != 1 {
 		t.Fatalf("archived messages: %+v, %v", p, err)
+	}
+}
+
+func TestSpecialUseFolderDiscovery(t *testing.T) {
+	for _, tc := range []struct {
+		name, response, want string
+	}{
+		{"unique localized folder", `* LIST (\Trash) "/" "Deleted Items"` + "\r\n", "Deleted Items"},
+		{"ignore unselectable", `* LIST (\Trash \NoSelect) "/" "Unreadable"` + "\r\n" + `* LIST (\Trash) "/" "Deleted Items"` + "\r\n", "Deleted Items"},
+		{"ambiguous", `* LIST (\Trash) "/" "Trash"` + "\r\n" + `* LIST (\Trash) "/" "Other Trash"` + "\r\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, peer := net.Pipe()
+			defer peer.Close()
+			_ = peer.SetDeadline(time.Now().Add(3 * time.Second))
+			c := imapclient.New(conn, nil)
+			defer c.Close()
+			fixture := make(chan error, 1)
+			go func() {
+				_, err := io.WriteString(peer, "* PREAUTH [CAPABILITY IMAP4rev1 LIST-EXTENDED SPECIAL-USE] ready\r\n")
+				if err == nil {
+					var line string
+					line, err = bufio.NewReader(peer).ReadString('\n')
+					tag, command, _ := strings.Cut(line, " ")
+					if err == nil && (!strings.HasPrefix(command, "LIST ") || !strings.Contains(command, "RETURN (SPECIAL-USE)")) {
+						err = fmt.Errorf("unexpected LIST command: %q", line)
+					}
+					if err == nil {
+						_, err = io.WriteString(peer, tc.response+tag+" OK list complete\r\n")
+					}
+				}
+				fixture <- err
+				if err != nil {
+					_ = peer.Close()
+				}
+			}()
+			folder, err := specialFolder(c, imap.MailboxAttrTrash)
+			if fixtureErr := <-fixture; fixtureErr != nil {
+				t.Fatal(fixtureErr)
+			}
+			if folder != tc.want || (err != nil) != (tc.want == "") {
+				t.Fatalf("folder = %q, %v; want %q", folder, err, tc.want)
+			}
+		})
 	}
 }
 

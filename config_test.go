@@ -9,6 +9,38 @@ import (
 	"testing"
 )
 
+func TestConfigureSMTP(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		in                  account
+		address, mode, from string
+		bad                 bool
+	}{
+		{name: "Gmail", in: account{Provider: "gmail", Username: "you@gmail.com"}, address: "smtp.gmail.com:465", mode: "implicit", from: "you@gmail.com"},
+		{name: "iCloud short username", in: account{Provider: "icloud", Username: "you"}, address: "smtp.mail.me.com:587", mode: "starttls", from: "you@icloud.com"},
+		{name: "Outlook personal", in: account{Provider: "outlook", Tenant: "consumers", Username: "you@outlook.com"}, address: "smtp-mail.outlook.com:587", mode: "starttls", from: "you@outlook.com"},
+		{name: "Outlook organization", in: account{Provider: "outlook", Tenant: "tenant-id", Username: "you@example.test"}, address: "smtp.office365.com:587", mode: "starttls", from: "you@example.test"},
+		{name: "custom SMTP", in: account{Provider: "gmail", Username: "you", FromAddress: "you@example.test", SMTPAddress: "mail.example.test:587", SMTPTLS: "starttls"}, address: "mail.example.test:587", mode: "starttls", from: "you@example.test"},
+		{name: "untrusted Outlook OAuth endpoint", in: account{Provider: "outlook", Username: "you@outlook.com", SMTPAddress: "mail.example.test:587"}, bad: true},
+		{name: "plaintext forbidden", in: account{Provider: "gmail", Username: "you@gmail.com", SMTPTLS: "plain"}, bad: true},
+		{name: "invalid sender", in: account{Provider: "qq", Username: "1234"}, bad: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := tc.in
+			err := configureSMTP(&a)
+			if tc.bad {
+				if err == nil {
+					t.Fatal("invalid SMTP settings accepted")
+				}
+				return
+			}
+			if err != nil || a.SMTPAddress != tc.address || a.SMTPTLS != tc.mode || a.FromAddress != tc.from {
+				t.Fatalf("SMTP settings: %s, %s, %s, %v", a.SMTPAddress, a.SMTPTLS, a.FromAddress, err)
+			}
+		})
+	}
+}
+
 func TestLoadAdditionalAllowedHosts(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

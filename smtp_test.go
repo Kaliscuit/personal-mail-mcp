@@ -192,6 +192,52 @@ func serveSMTPFixture(conn net.Conn, tlsConfig *tls.Config, startTLS bool, mecha
 	return reply(final)
 }
 
+func TestSMTPDoesNotFallBackToPlaintext(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	fixture := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			fixture <- err
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+		reader := bufio.NewReader(conn)
+		if _, err := io.WriteString(conn, "220 fixture\r\n"); err != nil {
+			fixture <- err
+			return
+		}
+		if line, err := reader.ReadString('\n'); err != nil || !strings.HasPrefix(line, "EHLO ") {
+			fixture <- fmt.Errorf("expected EHLO, got %q: %v", line, err)
+			return
+		}
+		if _, err := io.WriteString(conn, "250-fixture\r\n250 AUTH PLAIN LOGIN\r\n"); err != nil {
+			fixture <- err
+			return
+		}
+		if line, err := reader.ReadString('\n'); line != "" || err != io.EOF {
+			fixture <- fmt.Errorf("expected connection close without SMTP authentication: %v", err)
+			return
+		}
+		fixture <- nil
+	}()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	conn, err := openSMTP(ctx, ln.Addr().String(), true, &tls.Config{ServerName: "example.test", MinVersion: tls.VersionTLS12})
+	if err == nil {
+		conn.Close()
+		t.Fatal("accepted plaintext SMTP")
+	}
+	if err := <-fixture; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReplyCompositionAndValidation(t *testing.T) {
 	var msg outboundMessage
 	env := &imap.Envelope{Subject: "Hello\r\nBcc: hidden", From: []imap.Address{{Mailbox: "from", Host: "example.test"}}, ReplyTo: []imap.Address{{Mailbox: "replies", Host: "example.test"}}, MessageID: "thread@example.test"}
