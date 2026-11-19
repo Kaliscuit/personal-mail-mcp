@@ -15,10 +15,11 @@ import (
 )
 
 type config struct {
-	Interfaces []string           `json:"interfaces"`
-	Port       int                `json:"port"`
-	TokenFile  string             `json:"token_file"`
-	Accounts   map[string]account `json:"accounts"`
+	Interfaces             []string           `json:"interfaces"`
+	Port                   int                `json:"port"`
+	AdditionalAllowedHosts []string           `json:"additional_allowed_hosts,omitempty"`
+	TokenFile              string             `json:"token_file"`
+	Accounts               map[string]account `json:"accounts"`
 }
 
 type account struct {
@@ -65,6 +66,12 @@ func loadConfig(path string) (config, error) {
 	}
 	if len(c.Interfaces) == 0 || c.Port < 1 || c.Port > 65535 || c.TokenFile == "" || len(c.Accounts) == 0 {
 		return c, errors.New("interfaces, valid port, token_file and accounts are required")
+	}
+	for i, host := range c.AdditionalAllowedHosts {
+		if !validDNSHostname(host) {
+			return c, fmt.Errorf("additional_allowed_hosts[%d] must be a DNS hostname without a port", i)
+		}
+		c.AdditionalAllowedHosts[i] = strings.ToLower(host)
 	}
 	base := filepath.Dir(path)
 	resolve := func(p string) string {
@@ -115,6 +122,27 @@ func loadConfig(path string) (config, error) {
 		}
 	}
 	return c, nil
+}
+
+func validDNSHostname(host string) bool {
+	if len(host) == 0 || len(host) > 253 {
+		return false
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return false
+	}
+	for label := range strings.SplitSeq(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := range len(label) {
+			c := label[i]
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func validTenant(s string) bool {

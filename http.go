@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +24,11 @@ const (
 	maxHTTPConnections = 64
 )
 
-func mcpHandler(server *mcp.Server, token [32]byte) http.Handler {
+func mcpHandler(server *mcp.Server, token [32]byte, additionalAllowedHosts []string) http.Handler {
+	allowed := make(map[string]struct{}, len(additionalAllowedHosts))
+	for _, host := range additionalAllowedHosts {
+		allowed[host] = struct{}{}
+	}
 	transport := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{
 		Stateless: true, JSONResponse: true, MaxRequestBodyBytes: maxHTTPBody,
 	})
@@ -65,9 +70,35 @@ func mcpHandler(server *mcp.Server, token [32]byte) http.Handler {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 		defer cancel()
-		transport.ServeHTTP(w, r.WithContext(ctx))
+		upstream := r.WithContext(ctx)
+		if isAdditionalLoopbackHost(r, allowed) {
+			upstream.Host = "localhost"
+		}
+		transport.ServeHTTP(w, upstream)
 	})
 	return http.NewCrossOriginProtection().Handler(mux)
+}
+
+func isAdditionalLoopbackHost(r *http.Request, allowed map[string]struct{}) bool {
+	local, ok := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
+	if len(allowed) == 0 || !ok || local == nil || !local.IP.IsLoopback() {
+		return false
+	}
+	host := r.Host
+	if strings.Contains(host, ":") {
+		var port string
+		var err error
+		host, port, err = net.SplitHostPort(host)
+		n, portErr := strconv.ParseUint(port, 10, 16)
+		if err != nil || portErr != nil || n == 0 || strings.HasPrefix(r.Host, "[") {
+			return false
+		}
+	}
+	if !validDNSHostname(host) {
+		return false
+	}
+	_, ok = allowed[strings.ToLower(host)]
+	return ok
 }
 
 type cappedListener struct {

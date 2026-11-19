@@ -17,7 +17,7 @@ import (
 func TestMCPHTTP(t *testing.T) {
 	const token = "secret-for-tests-only-at-least-32-chars"
 	s := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
-	h := mcpHandler(s, sha256.Sum256([]byte(token)))
+	h := mcpHandler(s, sha256.Sum256([]byte(token)), nil)
 	for _, tc := range []struct {
 		name, auth, fetchSite string
 		status                int
@@ -41,6 +41,62 @@ func TestMCPHTTP(t *testing.T) {
 	}
 }
 
+func TestAdditionalAllowedHosts(t *testing.T) {
+	const token = "secret-for-tests-only-at-least-32-chars"
+	const publicHost = "mail.example.test"
+	const init = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}`
+	s := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+	hash := sha256.Sum256([]byte(token))
+	configured := httptest.NewServer(mcpHandler(s, hash, []string{publicHost}))
+	defer configured.Close()
+	defaults := httptest.NewServer(mcpHandler(s, hash, nil))
+	defer defaults.Close()
+	for _, tc := range []struct {
+		name, host, auth, origin, forwardedHost string
+		server                                  *httptest.Server
+		status                                  int
+	}{
+		{"allowlisted", publicHost, token, "", "", configured, 200},
+		{"case and port", "MAIL.EXAMPLE.TEST:443", token, "", "", configured, 200},
+		{"same origin", publicHost, token, "https://" + publicHost, "", configured, 200},
+		{"loopback remains valid", "localhost:18080", token, "", "", configured, 200},
+		{"no configuration", publicHost, token, "", "", defaults, 403},
+		{"unlisted", "other.example.test", token, "", "", configured, 403},
+		{"subdomain", "sub." + publicHost, token, "", "", configured, 403},
+		{"invalid port", publicHost + ":65536", token, "", "", configured, 403},
+		{"trailing dot", publicHost + ".", token, "", "", configured, 403},
+		{"forwarded host ignored", "other.example.test", token, "", publicHost, configured, 403},
+		{"missing token", publicHost, "", "", "", configured, 401},
+		{"wrong token", publicHost, "wrong", "", "", configured, 401},
+		{"cross origin", publicHost, token, "https://other.example.test", "", configured, 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := http.NewRequestWithContext(t.Context(), http.MethodPost, tc.server.URL+"/mcp", strings.NewReader(init))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Host = tc.host
+			if tc.auth != "" {
+				r.Header.Set("Authorization", "Bearer "+tc.auth)
+			}
+			if tc.origin != "" {
+				r.Header.Set("Origin", tc.origin)
+			}
+			r.Header.Set("X-Forwarded-Host", tc.forwardedHost)
+			r.Header.Set("Accept", "application/json, text/event-stream")
+			r.Header.Set("Content-Type", "application/json")
+			resp, err := tc.server.Client().Do(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.status {
+				t.Fatalf("status %d, want %d", resp.StatusCode, tc.status)
+			}
+		})
+	}
+}
+
 type bearerTransport string
 
 func (token bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -55,7 +111,7 @@ func TestMCPToolCalls(t *testing.T) {
 		"personal": {Provider: "gmail", Username: "not-visible@example.net", PasswordFile: "secret-path"},
 		"work":     {Provider: "outlook"},
 	}})
-	h := httptest.NewServer(mcpHandler(newServer(service), sha256.Sum256([]byte(token))))
+	h := httptest.NewServer(mcpHandler(newServer(service), sha256.Sum256([]byte(token)), nil))
 	defer h.Close()
 	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil)
 	conn, err := client.Connect(t.Context(), &mcp.StreamableClientTransport{
@@ -97,7 +153,7 @@ func TestMCPToolCalls(t *testing.T) {
 func TestHTTPRejectsBatchAndOversize(t *testing.T) {
 	const token = "secret-for-tests-only-at-least-32-chars"
 	s := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
-	h := mcpHandler(s, sha256.Sum256([]byte(token)))
+	h := mcpHandler(s, sha256.Sum256([]byte(token)), nil)
 	for _, tc := range []struct {
 		body string
 		want int

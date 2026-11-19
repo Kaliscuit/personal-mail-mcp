@@ -47,7 +47,7 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		return serve(ctx, endpoints, mcpHandler(newServer(newMailService(c)), token))
+		return serve(ctx, endpoints, mcpHandler(newServer(newMailService(c)), token, c.AdditionalAllowedHosts))
 	case len(args) == 2 && args[0] == "authorize-outlook":
 		c, err := loadConfig(*path)
 		if err != nil {
