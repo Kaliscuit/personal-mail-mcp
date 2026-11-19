@@ -165,11 +165,13 @@ func examine(c *imapclient.Client, folder string, validity uint32) (*imap.Select
 }
 
 type messageSummary struct {
-	UID     imap.UID `json:"uid"`
-	Subject string   `json:"subject"`
-	From    []string `json:"from"`
-	Date    string   `json:"date,omitempty"`
-	Seen    bool     `json:"seen"`
+	UID      imap.UID `json:"uid"`
+	Subject  string   `json:"subject"`
+	From     []string `json:"from"`
+	Date     string   `json:"date,omitempty"`
+	Seen     bool     `json:"seen"`
+	Starred  bool     `json:"starred"`
+	Keywords []string `json:"keywords,omitempty"`
 }
 
 func summarize(uid imap.UID, env *imap.Envelope) messageSummary {
@@ -243,7 +245,7 @@ func findMessages(c *imapclient.Client, in searchInput, criteria imap.SearchCrit
 	}
 	for _, item := range messages {
 		summary := summarize(item.UID, item.Envelope)
-		summary.Seen = hasSeen(item.Flags)
+		setSummaryFlags(&summary, item.Flags)
 		out.Messages = append(out.Messages, summary)
 	}
 	sort.Slice(out.Messages, func(i, j int) bool { return out.Messages[i].UID > out.Messages[j].UID })
@@ -355,7 +357,7 @@ func hasSeen(flags []imap.Flag) bool {
 
 func readBody(c *imapclient.Client, msg *imapclient.FetchMessageBuffer) (messageBody, error) {
 	out := messageBody{messageSummary: summarize(msg.UID, msg.Envelope)}
-	out.Seen = hasSeen(msg.Flags)
+	setSummaryFlags(&out.messageSummary, msg.Flags)
 	out.ReplyTo = replyAddresses(msg.Envelope)
 	selected, path := selectBody(msg.BodyStructure, nil)
 	if selected == nil {

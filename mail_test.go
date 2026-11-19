@@ -79,7 +79,7 @@ func TestIMAPReadAndWrite(t *testing.T) {
 	if err != nil || strings.Join(folders.Folders, ",") != "Archive,INBOX" {
 		t.Fatalf("folders = %+v, %v", folders, err)
 	}
-	q := searchInput{From: "sender@example.net", Subject: "reservation", Since: "2021-11-16", Before: "2021-11-17", Limit: 2}
+	q := searchInput{searchFilters: searchFilters{From: "sender@example.net", Subject: "reservation", Since: "2021-11-16", Before: "2021-11-17"}, Limit: 2}
 	criteria, err := q.validate()
 	if err != nil {
 		t.Fatal(err)
@@ -144,6 +144,26 @@ func TestIMAPReadAndWrite(t *testing.T) {
 		if err != nil || len(p.Messages) == 0 || p.Messages[0].Seen != seen {
 			t.Fatalf("read status after STORE: %+v, %v", p, err)
 		}
+	}
+	if _, err := c.Store(imap.UIDSetNum(1), &imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{imap.FlagSeen}}, nil).Collect(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Store(imap.UIDSetNum(3), &imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{imap.FlagFlagged, "project-abc"}}, nil).Collect(); err != nil {
+		t.Fatal(err)
+	}
+	unread, starred := false, true
+	filtered := searchInput{searchFilters: searchFilters{Seen: &unread, Starred: &starred, Keyword: "project-abc", To: "reader@example.net", Body: "Reservation"}, Limit: 1}
+	filterCriteria, err := filtered.validate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	match, err := findMessages(c, filtered, filterCriteria)
+	if err != nil || len(match.Messages) != 1 || match.Messages[0].UID != 3 || !match.Messages[0].Starred || match.Messages[0].Seen || match.NextBeforeUID != 0 {
+		t.Fatalf("filtered search: %+v, %v", match, err)
+	}
+	counts, err := readMailboxStatus(c, "INBOX")
+	if err != nil || counts.Messages != 3 || counts.Unseen != 2 || counts.UIDValidity != page.UIDValidity {
+		t.Fatalf("folder counts: %+v, %v", counts, err)
 	}
 	archive := "Archive"
 	if _, err := specialFolder(c, imap.MailboxAttrTrash); err == nil {

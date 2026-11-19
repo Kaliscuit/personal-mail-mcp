@@ -128,13 +128,13 @@ func TestMCPToolCalls(t *testing.T) {
 	var names []string
 	for _, tool := range tools.Tools {
 		names = append(names, tool.Name)
-		readOnly := slices.Contains([]string{"download_attachment", "list_accounts", "list_attachments", "list_folders", "read_message", "search_messages"}, tool.Name)
+		readOnly := slices.Contains([]string{"download_attachment", "get_mailbox_status", "get_thread", "list_accounts", "list_attachments", "list_folders", "read_message", "search_mailboxes", "search_messages"}, tool.Name)
 		if tool.Annotations == nil || tool.Annotations.ReadOnlyHint != readOnly {
 			t.Fatalf("tool %s has incorrect read-only annotation", tool.Name)
 		}
 	}
 	slices.Sort(names)
-	if !slices.Equal(names, []string{"archive_message", "delete_message", "download_attachment", "forward_message", "list_accounts", "list_attachments", "list_folders", "move_message", "read_message", "reply_message", "search_messages", "send_message", "set_message_read"}) {
+	if !slices.Equal(names, []string{"archive_message", "delete_message", "download_attachment", "forward_message", "get_mailbox_status", "get_thread", "list_accounts", "list_attachments", "list_folders", "move_message", "read_message", "reply_message", "search_mailboxes", "search_messages", "send_message", "set_message_read"}) {
 		t.Fatalf("unexpected tools: %v", names)
 	}
 	result, err := conn.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_accounts"})
@@ -148,6 +148,13 @@ func TestMCPToolCalls(t *testing.T) {
 	result, err = conn.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_folders", Arguments: map[string]string{"account": "absent"}})
 	if err != nil || !result.IsError {
 		t.Fatalf("unknown account must return a tool error: %v, %v", result, err)
+	}
+	result, err = conn.CallTool(t.Context(), &mcp.CallToolParams{Name: "search_mailboxes", Arguments: map[string]any{
+		"seen": false, "scopes": []map[string]string{{"account": "absent"}, {"account": "personal", "folder": "Archive"}},
+	}})
+	if err != nil || result.IsError || !strings.Contains(result.Content[0].(*mcp.TextContent).Text, `"folder":"INBOX"`) ||
+		!strings.Contains(result.Content[0].(*mcp.TextContent).Text, "unknown account") || !strings.Contains(result.Content[0].(*mcp.TextContent).Text, "credential is unavailable") {
+		t.Fatalf("expected one scoped error per mailbox: %v, %v", result, err)
 	}
 	for _, call := range []struct {
 		name string
