@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net"
@@ -39,7 +40,7 @@ type sizedReader struct{ *strings.Reader }
 
 func (r sizedReader) Size() int64 { return r.Reader.Size() }
 
-func TestReadOnlyIMAP(t *testing.T) {
+func TestIMAPReadAndWrite(t *testing.T) {
 	backend := imapmemserver.New()
 	u := imapmemserver.NewUser("reader", "test-only")
 	if err := u.Create("INBOX", nil); err != nil {
@@ -55,7 +56,7 @@ func TestReadOnlyIMAP(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	srv := imapserver.New(&imapserver.Options{InsecureAuth: true, NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+	srv := imapserver.New(&imapserver.Options{InsecureAuth: true, Caps: imap.CapSet{imap.CapIMAP4rev2: {}}, NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
 		return backend.NewSession(), nil, nil
 	}})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -107,14 +108,104 @@ func TestReadOnlyIMAP(t *testing.T) {
 	if err != nil || strings.TrimSpace(body.Body) != "Reservation 你好." || body.MediaType != "text/plain" {
 		t.Fatalf("body = %+v, %v", body, err)
 	}
+	file, err := downloadAttachment(c, meta, files[0].Part)
+	if err != nil || file.ContentBase64 != "c2Vuc2l0aXZlIGZpbGU=" {
+		t.Fatalf("attachment: %+v, %v", file, err)
+	}
+	if _, err := downloadAttachment(c, meta, []int{1}); err == nil {
+		t.Fatal("non-attachment part accepted")
+	}
+	var forward outboundMessage
+	if err := prepareForward(c, &forward, meta); err != nil {
+		t.Fatal(err)
+	}
+	if len(forward.attachments) != 1 || forward.attachments[0].name != "original.eml" || string(forward.attachments[0].data) != strings.ReplaceAll(exampleMessage, "\n", "\r\n") {
+		t.Fatal("forwarding did not preserve the complete original message")
+	}
 	flags, err := c.Fetch(imap.UIDSetNum(3), &imap.FetchOptions{Flags: true}).Collect()
 	if err != nil || len(flags) != 1 {
 		t.Fatalf("flags = %v, %v", flags, err)
 	}
-	for _, flag := range flags[0].Flags {
-		if flag == imap.FlagSeen {
-			t.Fatal("reading marked the message seen")
+	if hasSeen(flags[0].Flags) {
+		t.Fatal("reading marked the message seen")
+	}
+	message := messageInput{Folder: "INBOX", UID: 3, UIDValidity: page.UIDValidity}
+	bad := message
+	bad.UIDValidity++
+	if err := setSeen(c, seenInput{bad, true}); err == nil {
+		t.Fatal("stale UID validity accepted for STORE")
+	}
+	for _, seen := range []bool{true, false} {
+		if err := setSeen(c, seenInput{message, seen}); err != nil {
+			t.Fatal(err)
 		}
+		q.BeforeUID = 0
+		p, err := findMessages(c, q, criteria)
+		if err != nil || len(p.Messages) == 0 || p.Messages[0].Seen != seen {
+			t.Fatalf("read status after STORE: %+v, %v", p, err)
+		}
+	}
+	archive := "Archive"
+	if _, err := specialFolder(c, imap.MailboxAttrTrash); err == nil {
+		t.Fatal("unexpected trash folder")
+	}
+	if _, err := moveMessage(c, bad, archive); err == nil {
+		t.Fatal("stale UID validity accepted for MOVE")
+	}
+	if moved, err := moveMessage(c, message, archive); err != nil || moved.Destination != archive {
+		t.Fatalf("move: %+v, %v", moved, err)
+	}
+	if _, err := moveMessage(c, message, archive); err == nil {
+		t.Fatal("missing message accepted for MOVE")
+	}
+	q.Folder, q.UIDValidity = archive, 0
+	p, err := findMessages(c, q, criteria)
+	if err != nil || len(p.Messages) != 1 {
+		t.Fatalf("archived messages: %+v, %v", p, err)
+	}
+}
+
+func TestSpecialUseFolderDiscovery(t *testing.T) {
+	for _, tc := range []struct {
+		name, response, want string
+	}{
+		{"unique localized folder", `* LIST (\Trash) "/" "Deleted Items"` + "\r\n", "Deleted Items"},
+		{"ignore unselectable", `* LIST (\Trash \NoSelect) "/" "Unreadable"` + "\r\n" + `* LIST (\Trash) "/" "Deleted Items"` + "\r\n", "Deleted Items"},
+		{"ambiguous", `* LIST (\Trash) "/" "Trash"` + "\r\n" + `* LIST (\Trash) "/" "Other Trash"` + "\r\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, peer := net.Pipe()
+			defer peer.Close()
+			_ = peer.SetDeadline(time.Now().Add(3 * time.Second))
+			c := imapclient.New(conn, nil)
+			defer c.Close()
+			fixture := make(chan error, 1)
+			go func() {
+				_, err := io.WriteString(peer, "* PREAUTH [CAPABILITY IMAP4rev1 LIST-EXTENDED SPECIAL-USE] ready\r\n")
+				if err == nil {
+					var line string
+					line, err = bufio.NewReader(peer).ReadString('\n')
+					tag, command, _ := strings.Cut(line, " ")
+					if err == nil && (!strings.HasPrefix(command, "LIST ") || !strings.Contains(command, "RETURN (SPECIAL-USE)")) {
+						err = fmt.Errorf("unexpected LIST command: %q", line)
+					}
+					if err == nil {
+						_, err = io.WriteString(peer, tc.response+tag+" OK list complete\r\n")
+					}
+				}
+				fixture <- err
+				if err != nil {
+					_ = peer.Close()
+				}
+			}()
+			folder, err := specialFolder(c, imap.MailboxAttrTrash)
+			if fixtureErr := <-fixture; fixtureErr != nil {
+				t.Fatal(fixtureErr)
+			}
+			if folder != tc.want || (err != nil) != (tc.want == "") {
+				t.Fatalf("folder = %q, %v; want %q", folder, err, tc.want)
+			}
+		})
 	}
 }
 

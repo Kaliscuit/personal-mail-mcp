@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	maxHTTPBody        = 64 << 10
+	maxHTTPBody        = 4 << 20
 	maxHTTPConnections = 64
 )
 

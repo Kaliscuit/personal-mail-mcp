@@ -83,24 +83,9 @@ func (s *mailService) withClient(ctx context.Context, name string, run func(*ima
 	ctx, cancel := context.WithTimeout(ctx, 22*time.Second)
 	defer cancel()
 	deadline, _ := ctx.Deadline()
-	var secret string
-	var err error
-	if a.Provider == "outlook" {
-		a.refreshMu.Lock()
-		if ctx.Err() == nil {
-			secret, err = outlookToken(ctx, a.account, microsoftConfig(a.account))
-		} else {
-			err = errors.New("mail operation timed out")
-		}
-		a.refreshMu.Unlock()
-		if err != nil {
-			return err
-		}
-	} else {
-		secret, err = readSecret(a.PasswordFile)
-		if err != nil {
-			return errors.New("mail account credential is unavailable")
-		}
+	secret, err := a.credential(ctx)
+	if err != nil {
+		return err
 	}
 	dialer := tls.Dialer{NetDialer: &net.Dialer{Timeout: 8 * time.Second}, Config: &tls.Config{MinVersion: tls.VersionTLS12}}
 	conn, err := dialer.DialContext(ctx, "tcp", a.Address)
@@ -127,6 +112,22 @@ func (s *mailService) withClient(ctx context.Context, name string, run func(*ima
 	return run(client)
 }
 
+func (a *mailboxAccount) credential(ctx context.Context) (string, error) {
+	if a.Provider == "outlook" {
+		a.refreshMu.Lock()
+		defer a.refreshMu.Unlock()
+		if ctx.Err() != nil {
+			return "", errors.New("mail operation timed out")
+		}
+		return outlookToken(ctx, a.account, microsoftConfig(a.account))
+	}
+	secret, err := readSecret(a.PasswordFile)
+	if err != nil {
+		return "", errors.New("mail account credential is unavailable")
+	}
+	return secret, nil
+}
+
 type folderList struct {
 	Folders   []string `json:"folders"`
 	Truncated bool     `json:"truncated"`
@@ -136,15 +137,12 @@ func listFolders(c *imapclient.Client) (folderList, error) {
 	out := folderList{Folders: []string{}}
 	cmd := c.List("", "*", nil)
 	for item := cmd.Next(); item != nil; item = cmd.Next() {
-		selectable := true
-		for _, attr := range item.Attrs {
-			if strings.EqualFold(string(attr), `\Noselect`) || strings.EqualFold(string(attr), `\NonExistent`) {
-				selectable = false
-			}
+		if !selectableFolder(item) {
+			continue
 		}
-		if selectable && len(out.Folders) == maxFolders {
+		if len(out.Folders) == maxFolders {
 			out.Truncated = true
-		} else if selectable {
+		} else {
 			out.Folders = append(out.Folders, item.Mailbox)
 		}
 	}
@@ -171,6 +169,7 @@ type messageSummary struct {
 	Subject string   `json:"subject"`
 	From    []string `json:"from"`
 	Date    string   `json:"date,omitempty"`
+	Seen    bool     `json:"seen"`
 }
 
 func summarize(uid imap.UID, env *imap.Envelope) messageSummary {
@@ -180,11 +179,7 @@ func summarize(uid imap.UID, env *imap.Envelope) messageSummary {
 		if !env.Date.IsZero() {
 			out.Date = env.Date.Format(time.RFC3339)
 		}
-		for _, from := range env.From {
-			if addr := from.Addr(); addr != "" {
-				out.From = append(out.From, addr)
-			}
-		}
+		out.From = envelopeAddresses(env.From)
 	}
 	return out
 }
@@ -242,12 +237,14 @@ func findMessages(c *imapclient.Client, in searchInput, criteria imap.SearchCrit
 	if len(uids) == 0 {
 		return out, nil
 	}
-	messages, err := c.Fetch(imap.UIDSetNum(uids...), &imap.FetchOptions{UID: true, Envelope: true}).Collect()
+	messages, err := c.Fetch(imap.UIDSetNum(uids...), &imap.FetchOptions{UID: true, Envelope: true, Flags: true}).Collect()
 	if err != nil {
 		return out, errors.New("could not fetch message summaries")
 	}
 	for _, item := range messages {
-		out.Messages = append(out.Messages, summarize(item.UID, item.Envelope))
+		summary := summarize(item.UID, item.Envelope)
+		summary.Seen = hasSeen(item.Flags)
+		out.Messages = append(out.Messages, summary)
 	}
 	sort.Slice(out.Messages, func(i, j int) bool { return out.Messages[i].UID > out.Messages[j].UID })
 	return out, nil
@@ -258,7 +255,7 @@ func messageMetadata(c *imapclient.Client, in messageInput) (*imapclient.FetchMe
 		return nil, err
 	}
 	messages, err := c.Fetch(imap.UIDSetNum(in.UID), &imap.FetchOptions{
-		UID: true, Envelope: true, BodyStructure: &imap.FetchItemBodyStructure{Extended: true},
+		UID: true, Envelope: true, Flags: true, BodyStructure: &imap.FetchItemBodyStructure{Extended: true},
 	}).Collect()
 	if err != nil {
 		return nil, errors.New("could not fetch message metadata")
@@ -275,6 +272,7 @@ type attachment struct {
 	Filename  string `json:"filename"`
 	MediaType string `json:"media_type"`
 	Size      uint32 `json:"encoded_size_bytes"`
+	Part      []int  `json:"part"`
 }
 
 func isAttachment(p imap.BodyStructure) bool {
@@ -289,21 +287,19 @@ func isAttachment(p imap.BodyStructure) bool {
 
 func attachments(structure imap.BodyStructure) []attachment {
 	items := []attachment{}
-	structure.Walk(func(_ []int, p imap.BodyStructure) bool {
-		if part, ok := p.(*imap.BodyStructureSinglePart); ok && isAttachment(p) {
-			items = append(items, attachment{part.Filename(), part.MediaType(), part.Size})
-		}
-		return true
+	walkAttachments(structure, func(path []int, part *imap.BodyStructureSinglePart) {
+		items = append(items, attachmentInfo(path, part))
 	})
 	return items
 }
 
 type messageBody struct {
 	messageSummary
-	MediaType string `json:"media_type,omitempty"`
-	Body      string `json:"body"`
-	Truncated bool   `json:"truncated"`
-	TooLarge  bool   `json:"body_too_large,omitempty"`
+	ReplyTo   []string `json:"reply_to,omitempty"`
+	MediaType string   `json:"media_type,omitempty"`
+	Body      string   `json:"body"`
+	Truncated bool     `json:"truncated"`
+	TooLarge  bool     `json:"body_too_large,omitempty"`
 }
 
 func selectBody(part imap.BodyStructure, path []int) (*imap.BodyStructureSinglePart, []int) {
@@ -348,8 +344,19 @@ func selectBody(part imap.BodyStructure, path []int) (*imap.BodyStructureSingleP
 	return nil, nil
 }
 
+func hasSeen(flags []imap.Flag) bool {
+	for _, flag := range flags {
+		if strings.EqualFold(string(flag), string(imap.FlagSeen)) {
+			return true
+		}
+	}
+	return false
+}
+
 func readBody(c *imapclient.Client, msg *imapclient.FetchMessageBuffer) (messageBody, error) {
 	out := messageBody{messageSummary: summarize(msg.UID, msg.Envelope)}
+	out.Seen = hasSeen(msg.Flags)
+	out.ReplyTo = replyAddresses(msg.Envelope)
 	selected, path := selectBody(msg.BodyStructure, nil)
 	if selected == nil {
 		return out, nil
@@ -363,25 +370,13 @@ func readBody(c *imapclient.Client, msg *imapclient.FetchMessageBuffer) (message
 	if _, single := msg.BodyStructure.(*imap.BodyStructureSinglePart); single {
 		section.Part, section.Specifier = nil, imap.PartSpecifierText
 	}
-	// Match the FETCH reply by sequence number even if the server writes the
-	// literal before UID. Verify the UID before using any returned bytes.
-	fetched, err := c.Fetch(imap.SeqSetNum(msg.SeqNum), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{section}}).Collect()
-	if err != nil {
-		return out, errors.New("could not fetch message body")
-	}
-	var body []byte
-	for _, m := range fetched {
-		if m.UID == msg.UID {
-			body = m.FindBodySection(section)
-			break
-		}
-	}
-	if body == nil {
-		return out, errors.New("message body is no longer available")
-	}
-	if len(body) > maxBodyBytes {
+	body, err := fetchMessageSection(c, msg, section, maxBodyBytes)
+	if errors.Is(err, errSectionTooLarge) {
 		out.TooLarge = true
 		return out, nil
+	}
+	if err != nil {
+		return out, err
 	}
 	var header message.Header
 	header.Set("Content-Type", mime.FormatMediaType(out.MediaType, selected.Params))
