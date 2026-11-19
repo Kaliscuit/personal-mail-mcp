@@ -32,6 +32,9 @@ type account struct {
 	OAuthFile     string `json:"oauth_file,omitempty"`
 	ArchiveFolder string `json:"archive_folder,omitempty"`
 	TrashFolder   string `json:"trash_folder,omitempty"`
+	SMTPAddress   string `json:"smtp_address,omitempty"`
+	SMTPTLS       string `json:"smtp_tls,omitempty"`
+	FromAddress   string `json:"from_address,omitempty"`
 }
 
 var providerAddress = map[string]string{
@@ -118,10 +121,11 @@ func loadConfig(path string) (config, error) {
 		} else if a.PasswordFile == "" || a.OAuthFile != "" || a.ClientID != "" || a.Tenant != "" {
 			return c, fmt.Errorf("account %q requires password_file and no OAuth settings", name)
 		}
-		host, p, err := net.SplitHostPort(a.Address)
-		n, portErr := strconv.Atoi(p)
-		if err != nil || host == "" || portErr != nil || n < 1 || n > 65535 {
+		if !validEndpoint(a.Address) {
 			return c, fmt.Errorf("account %q has an invalid IMAP address", name)
+		}
+		if err := configureSMTP(&a); err != nil {
+			return c, fmt.Errorf("account %q: %w", name, err)
 		}
 		a.PasswordFile = resolve(a.PasswordFile)
 		c.Accounts[name] = a
@@ -132,6 +136,45 @@ func loadConfig(path string) (config, error) {
 		}
 	}
 	return c, nil
+}
+
+func validEndpoint(address string) bool {
+	host, p, err := net.SplitHostPort(address)
+	n, portErr := strconv.Atoi(p)
+	return err == nil && host != "" && portErr == nil && n >= 1 && n <= 65535
+}
+
+func configureSMTP(a *account) error {
+	endpoint := providerSMTP[a.Provider]
+	const outlookConsumerSMTP = "smtp-mail.outlook.com:587"
+	if a.Provider == "outlook" && a.Tenant == "consumers" {
+		endpoint.address = outlookConsumerSMTP
+	}
+	if a.SMTPAddress == "" {
+		a.SMTPAddress = endpoint.address
+	}
+	if a.SMTPTLS == "" {
+		a.SMTPTLS = "implicit"
+		if endpoint.startTLS {
+			a.SMTPTLS = "starttls"
+		}
+	}
+	if !validEndpoint(a.SMTPAddress) || (a.SMTPTLS != "implicit" && a.SMTPTLS != "starttls") {
+		return errors.New("smtp_address must be a host:port and smtp_tls must be implicit or starttls")
+	}
+	if a.Provider == "outlook" && (a.SMTPTLS != "starttls" || (a.SMTPAddress != providerSMTP["outlook"].address && a.SMTPAddress != outlookConsumerSMTP)) {
+		return errors.New("Outlook SMTP requires a Microsoft submission endpoint and STARTTLS")
+	}
+	if a.FromAddress == "" {
+		a.FromAddress = a.Username
+		if a.Provider == "icloud" && !strings.Contains(a.Username, "@") {
+			a.FromAddress += "@icloud.com"
+		}
+	}
+	if !validEnvelopeAddress(a.FromAddress) {
+		return errors.New("from_address (or the default from username) must be a valid email address")
+	}
+	return nil
 }
 
 func validDNSHostname(host string) bool {

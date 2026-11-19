@@ -168,5 +168,23 @@ func newServer(service *mailService) *mcp.Server {
 		return nil, out, err
 	})
 	addMailboxWriteTools(s, service)
+	addDeliveryTools(s, service)
+	mcp.AddTool(s, tool("download_attachment", "Download one attachment from list_attachments as Base64, without changing read status."), func(ctx context.Context, _ *mcp.CallToolRequest, in attachmentInput) (*mcp.CallToolResult, attachmentDownload, error) {
+		var out attachmentDownload
+		if err := in.validate(); err != nil {
+			return nil, out, err
+		}
+		if len(in.Part) == 0 || len(in.Part) > maxFetchDepth {
+			return nil, out, errors.New("invalid attachment part; use list_attachments")
+		}
+		err := service.withClient(ctx, in.Account, func(c *imapclient.Client) error {
+			msg, err := messageMetadata(c, in.messageInput)
+			if err == nil {
+				out, err = downloadAttachment(c, msg, in.Part)
+			}
+			return err
+		})
+		return nil, out, err
+	})
 	return s
 }

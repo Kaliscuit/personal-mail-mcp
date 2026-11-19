@@ -104,10 +104,6 @@ func moveMessage(c *imapclient.Client, in messageInput, dest string) (moveResult
 	if in.Folder == dest || (strings.EqualFold(in.Folder, "INBOX") && strings.EqualFold(dest, "INBOX")) {
 		return moveResult{}, errors.New("message is already in the destination folder")
 	}
-	// The library otherwise falls back to COPY, STORE and potentially a folder-wide EXPUNGE.
-	if !c.Caps().Has(imap.CapMove) {
-		return moveResult{}, errors.New("mail server does not support safe IMAP MOVE")
-	}
 	if err := selectForWrite(c, in); err != nil {
 		return moveResult{}, err
 	}
@@ -118,6 +114,10 @@ func moveMessage(c *imapclient.Client, in messageInput, dest string) (moveResult
 	}
 	if uids, ok := found.All.(imap.UIDSet); !ok || !uids.Contains(in.UID) {
 		return moveResult{}, errors.New("message not found in the source folder")
+	}
+	// The library otherwise falls back to COPY, STORE and potentially a folder-wide EXPUNGE.
+	if !c.Caps().Has(imap.CapMove) {
+		return moveResult{}, errors.New("mail server does not support safe IMAP MOVE")
 	}
 	data, err := c.Move(uid, dest).Wait()
 	if err != nil {
@@ -135,11 +135,16 @@ func moveMessage(c *imapclient.Client, in messageInput, dest string) (moveResult
 func addMailboxWriteTools(s *mcp.Server, service *mailService) {
 	mcp.AddTool(s, writeTool("set_message_read", "Set the read or unread status of one message.", false, true, false), func(ctx context.Context, _ *mcp.CallToolRequest, in seenInput) (*mcp.CallToolResult, struct {
 		Seen bool `json:"seen"`
-	}, error) { out := struct {
-		Seen bool `json:"seen"`
-	}{in.Seen}; if err := in.validate(); err != nil {
+	}, error) {
+		out := struct {
+			Seen bool `json:"seen"`
+		}{in.Seen}
+		if err := in.validate(); err != nil {
+			return nil, out, err
+		}
+		err := service.withClient(ctx, in.Account, func(c *imapclient.Client) error { return setSeen(c, in) })
 		return nil, out, err
-	}; err := service.withClient(ctx, in.Account, func(c *imapclient.Client) error { return setSeen(c, in) }); return nil, out, err })
+	})
 	move := func(ctx context.Context, in messageInput, dest string, attr imap.MailboxAttr) (*mcp.CallToolResult, moveResult, error) {
 		var out moveResult
 		if err := in.validate(); err != nil {

@@ -18,7 +18,7 @@ func microsoftConfig(a account) oauth2.Config {
 	base := "https://login.microsoftonline.com/" + a.Tenant + "/oauth2/v2.0/"
 	return oauth2.Config{ClientID: a.ClientID, Endpoint: oauth2.Endpoint{
 		TokenURL: base + "token", DeviceAuthURL: base + "devicecode", AuthStyle: oauth2.AuthStyleInParams,
-	}, Scopes: []string{"https://outlook.office.com/IMAP.AccessAsUser.All", "offline_access"}}
+	}, Scopes: []string{"https://outlook.office.com/IMAP.AccessAsUser.All", "https://outlook.office.com/SMTP.Send", "offline_access"}}
 }
 
 func oauthContext(ctx context.Context) context.Context {

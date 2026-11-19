@@ -39,7 +39,7 @@ type sizedReader struct{ *strings.Reader }
 
 func (r sizedReader) Size() int64 { return r.Reader.Size() }
 
-func TestReadOnlyIMAP(t *testing.T) {
+func TestIMAPReadAndWrite(t *testing.T) {
 	backend := imapmemserver.New()
 	u := imapmemserver.NewUser("reader", "test-only")
 	if err := u.Create("INBOX", nil); err != nil {
@@ -106,6 +106,20 @@ func TestReadOnlyIMAP(t *testing.T) {
 	body, err := readBody(c, meta)
 	if err != nil || strings.TrimSpace(body.Body) != "Reservation 你好." || body.MediaType != "text/plain" {
 		t.Fatalf("body = %+v, %v", body, err)
+	}
+	file, err := downloadAttachment(c, meta, files[0].Part)
+	if err != nil || file.ContentBase64 != "c2Vuc2l0aXZlIGZpbGU=" {
+		t.Fatalf("attachment: %+v, %v", file, err)
+	}
+	if _, err := downloadAttachment(c, meta, []int{1}); err == nil {
+		t.Fatal("non-attachment part accepted")
+	}
+	var forward outboundMessage
+	if err := prepareForward(c, &forward, meta); err != nil {
+		t.Fatal(err)
+	}
+	if len(forward.attachments) != 1 || forward.attachments[0].name != "original.eml" || string(forward.attachments[0].data) != strings.ReplaceAll(exampleMessage, "\n", "\r\n") {
+		t.Fatal("forwarding did not preserve the complete original message")
 	}
 	flags, err := c.Fetch(imap.UIDSetNum(3), &imap.FetchOptions{Flags: true}).Collect()
 	if err != nil || len(flags) != 1 {
