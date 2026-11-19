@@ -136,15 +136,12 @@ func listFolders(c *imapclient.Client) (folderList, error) {
 	out := folderList{Folders: []string{}}
 	cmd := c.List("", "*", nil)
 	for item := cmd.Next(); item != nil; item = cmd.Next() {
-		selectable := true
-		for _, attr := range item.Attrs {
-			if strings.EqualFold(string(attr), `\Noselect`) || strings.EqualFold(string(attr), `\NonExistent`) {
-				selectable = false
-			}
+		if !selectableFolder(item) {
+			continue
 		}
-		if selectable && len(out.Folders) == maxFolders {
+		if len(out.Folders) == maxFolders {
 			out.Truncated = true
-		} else if selectable {
+		} else {
 			out.Folders = append(out.Folders, item.Mailbox)
 		}
 	}
@@ -171,6 +168,7 @@ type messageSummary struct {
 	Subject string   `json:"subject"`
 	From    []string `json:"from"`
 	Date    string   `json:"date,omitempty"`
+	Seen    bool     `json:"seen"`
 }
 
 func summarize(uid imap.UID, env *imap.Envelope) messageSummary {
@@ -242,12 +240,14 @@ func findMessages(c *imapclient.Client, in searchInput, criteria imap.SearchCrit
 	if len(uids) == 0 {
 		return out, nil
 	}
-	messages, err := c.Fetch(imap.UIDSetNum(uids...), &imap.FetchOptions{UID: true, Envelope: true}).Collect()
+	messages, err := c.Fetch(imap.UIDSetNum(uids...), &imap.FetchOptions{UID: true, Envelope: true, Flags: true}).Collect()
 	if err != nil {
 		return out, errors.New("could not fetch message summaries")
 	}
 	for _, item := range messages {
-		out.Messages = append(out.Messages, summarize(item.UID, item.Envelope))
+		summary := summarize(item.UID, item.Envelope)
+		summary.Seen = hasSeen(item.Flags)
+		out.Messages = append(out.Messages, summary)
 	}
 	sort.Slice(out.Messages, func(i, j int) bool { return out.Messages[i].UID > out.Messages[j].UID })
 	return out, nil
@@ -258,7 +258,7 @@ func messageMetadata(c *imapclient.Client, in messageInput) (*imapclient.FetchMe
 		return nil, err
 	}
 	messages, err := c.Fetch(imap.UIDSetNum(in.UID), &imap.FetchOptions{
-		UID: true, Envelope: true, BodyStructure: &imap.FetchItemBodyStructure{Extended: true},
+		UID: true, Envelope: true, Flags: true, BodyStructure: &imap.FetchItemBodyStructure{Extended: true},
 	}).Collect()
 	if err != nil {
 		return nil, errors.New("could not fetch message metadata")
@@ -348,8 +348,18 @@ func selectBody(part imap.BodyStructure, path []int) (*imap.BodyStructureSingleP
 	return nil, nil
 }
 
+func hasSeen(flags []imap.Flag) bool {
+	for _, flag := range flags {
+		if strings.EqualFold(string(flag), string(imap.FlagSeen)) {
+			return true
+		}
+	}
+	return false
+}
+
 func readBody(c *imapclient.Client, msg *imapclient.FetchMessageBuffer) (messageBody, error) {
 	out := messageBody{messageSummary: summarize(msg.UID, msg.Envelope)}
+	out.Seen = hasSeen(msg.Flags)
 	selected, path := selectBody(msg.BodyStructure, nil)
 	if selected == nil {
 		return out, nil

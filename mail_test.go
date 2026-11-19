@@ -55,7 +55,7 @@ func TestReadOnlyIMAP(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	srv := imapserver.New(&imapserver.Options{InsecureAuth: true, NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+	srv := imapserver.New(&imapserver.Options{InsecureAuth: true, Caps: imap.CapSet{imap.CapIMAP4rev2: {}}, NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
 		return backend.NewSession(), nil, nil
 	}})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -111,10 +111,42 @@ func TestReadOnlyIMAP(t *testing.T) {
 	if err != nil || len(flags) != 1 {
 		t.Fatalf("flags = %v, %v", flags, err)
 	}
-	for _, flag := range flags[0].Flags {
-		if flag == imap.FlagSeen {
-			t.Fatal("reading marked the message seen")
+	if hasSeen(flags[0].Flags) {
+		t.Fatal("reading marked the message seen")
+	}
+	message := messageInput{Folder: "INBOX", UID: 3, UIDValidity: page.UIDValidity}
+	bad := message
+	bad.UIDValidity++
+	if err := setSeen(c, seenInput{bad, true}); err == nil {
+		t.Fatal("stale UID validity accepted for STORE")
+	}
+	for _, seen := range []bool{true, false} {
+		if err := setSeen(c, seenInput{message, seen}); err != nil {
+			t.Fatal(err)
 		}
+		q.BeforeUID = 0
+		p, err := findMessages(c, q, criteria)
+		if err != nil || len(p.Messages) == 0 || p.Messages[0].Seen != seen {
+			t.Fatalf("read status after STORE: %+v, %v", p, err)
+		}
+	}
+	archive := "Archive"
+	if _, err := specialFolder(c, imap.MailboxAttrTrash); err == nil {
+		t.Fatal("unexpected trash folder")
+	}
+	if _, err := moveMessage(c, bad, archive); err == nil {
+		t.Fatal("stale UID validity accepted for MOVE")
+	}
+	if moved, err := moveMessage(c, message, archive); err != nil || moved.Destination != archive {
+		t.Fatalf("move: %+v, %v", moved, err)
+	}
+	if _, err := moveMessage(c, message, archive); err == nil {
+		t.Fatal("missing message accepted for MOVE")
+	}
+	q.Folder, q.UIDValidity = archive, 0
+	p, err := findMessages(c, q, criteria)
+	if err != nil || len(p.Messages) != 1 {
+		t.Fatalf("archived messages: %+v, %v", p, err)
 	}
 }
 

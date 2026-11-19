@@ -128,12 +128,13 @@ func TestMCPToolCalls(t *testing.T) {
 	var names []string
 	for _, tool := range tools.Tools {
 		names = append(names, tool.Name)
-		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
-			t.Fatalf("tool %s does not declare read-only", tool.Name)
+		readOnly := slices.Contains([]string{"list_accounts", "list_attachments", "list_folders", "read_message", "search_messages"}, tool.Name)
+		if tool.Annotations == nil || tool.Annotations.ReadOnlyHint != readOnly {
+			t.Fatalf("tool %s has incorrect read-only annotation", tool.Name)
 		}
 	}
 	slices.Sort(names)
-	if !slices.Equal(names, []string{"list_accounts", "list_attachments", "list_folders", "read_message", "search_messages"}) {
+	if !slices.Equal(names, []string{"archive_message", "delete_message", "list_accounts", "list_attachments", "list_folders", "move_message", "read_message", "search_messages", "set_message_read"}) {
 		t.Fatalf("unexpected tools: %v", names)
 	}
 	result, err := conn.CallTool(t.Context(), &mcp.CallToolParams{Name: "list_accounts"})

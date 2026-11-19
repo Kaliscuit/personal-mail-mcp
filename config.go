@@ -23,13 +23,15 @@ type config struct {
 }
 
 type account struct {
-	Provider     string `json:"provider"`
-	Address      string `json:"address,omitempty"`
-	Username     string `json:"username"`
-	PasswordFile string `json:"password_file,omitempty"`
-	ClientID     string `json:"client_id,omitempty"`
-	Tenant       string `json:"tenant,omitempty"`
-	OAuthFile    string `json:"oauth_file,omitempty"`
+	Provider      string `json:"provider"`
+	Address       string `json:"address,omitempty"`
+	Username      string `json:"username"`
+	PasswordFile  string `json:"password_file,omitempty"`
+	ClientID      string `json:"client_id,omitempty"`
+	Tenant        string `json:"tenant,omitempty"`
+	OAuthFile     string `json:"oauth_file,omitempty"`
+	ArchiveFolder string `json:"archive_folder,omitempty"`
+	TrashFolder   string `json:"trash_folder,omitempty"`
 }
 
 var providerAddress = map[string]string{
@@ -86,6 +88,14 @@ func loadConfig(path string) (config, error) {
 		addr, ok := providerAddress[a.Provider]
 		if strings.TrimSpace(name) == "" || strings.TrimSpace(a.Username) == "" || !ok {
 			return c, fmt.Errorf("account %q requires a username and valid provider", name)
+		}
+		for _, folder := range []string{a.ArchiveFolder, a.TrashFolder} {
+			if _, err := folderName(folder); err != nil || strings.EqualFold(folder, "INBOX") {
+				return c, fmt.Errorf("account %q has an invalid archive or trash folder", name)
+			}
+		}
+		if a.ArchiveFolder != "" && a.ArchiveFolder == a.TrashFolder {
+			return c, fmt.Errorf("account %q must use distinct archive and trash folders", name)
 		}
 		if a.Address == "" {
 			a.Address = addr
