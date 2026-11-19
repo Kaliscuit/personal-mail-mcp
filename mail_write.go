@@ -32,19 +32,19 @@ func writeTool(name, description string, destructive, idempotent, external bool)
 	}}
 }
 
-func selectForWrite(c *imapclient.Client, in messageInput) error {
+func selectWritable(c *imapclient.Client, in messageInput) (*imap.SelectData, error) {
 	selected, err := c.Select(in.Folder, nil).Wait()
 	if err != nil || selected.UIDValidity == 0 || selected.ReadOnly {
-		return errors.New("could not open source folder for writing")
+		return nil, errors.New("could not open source folder for writing")
 	}
 	if selected.UIDValidity != in.UIDValidity {
-		return errors.New("folder UID validity changed; search again before modifying")
+		return nil, errors.New("folder UID validity changed; search again before modifying")
 	}
-	return nil
+	return selected, nil
 }
 
 func setSeen(c *imapclient.Client, in seenInput) error {
-	if err := selectForWrite(c, in.messageInput); err != nil {
+	if _, err := selectWritable(c, in.messageInput); err != nil {
 		return err
 	}
 	op := imap.StoreFlagsDel
@@ -100,8 +100,8 @@ func specialFolder(c *imapclient.Client, attr imap.MailboxAttr) (string, error) 
 	return found, nil
 }
 
-func moveMessage(c *imapclient.Client, in messageInput, dest string) (moveResult, error) {
-	data, err := moveSet(c, in, []imap.UID{in.UID}, dest)
+func moveMessage(c *mailboxSession, in messageInput, dest string, requiredFlags ...imap.Flag) (moveResult, error) {
+	data, err := moveSet(c, in, []imap.UID{in.UID}, dest, requiredFlags...)
 	if err != nil {
 		return moveResult{}, err
 	}
@@ -135,7 +135,7 @@ func addMailboxWriteTools(s *mcp.Server, service *mailService) {
 		if attr == "" && dest == "" {
 			return nil, out, errors.New("destination folder is required")
 		}
-		err := service.withClient(ctx, in.Account, func(c *imapclient.Client) error {
+		err := service.withMailbox(ctx, in.Account, func(c *mailboxSession) error {
 			var err error
 			a := service.accounts[in.Account]
 			switch attr {
@@ -145,7 +145,7 @@ func addMailboxWriteTools(s *mcp.Server, service *mailService) {
 				dest = a.TrashFolder
 			}
 			if dest == "" {
-				dest, err = specialFolder(c, attr)
+				dest, err = specialFolder(c.Client, attr)
 				if err != nil {
 					return err
 				}

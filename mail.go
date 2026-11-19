@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -34,10 +35,11 @@ type mailboxAccount struct {
 
 type mailService struct {
 	accounts map[string]*mailboxAccount
+	sessions chan struct{}
 }
 
 func newMailService(c config) *mailService {
-	s := &mailService{accounts: make(map[string]*mailboxAccount, len(c.Accounts))}
+	s := &mailService{accounts: make(map[string]*mailboxAccount, len(c.Accounts)), sessions: make(chan struct{}, 4)}
 	for name, a := range c.Accounts {
 		s.accounts[name] = &mailboxAccount{account: a}
 	}
@@ -50,6 +52,32 @@ type limitedConn struct {
 	deadline  time.Time
 	remaining int
 	fetch     fetchGuard
+	moveOnly  atomic.Bool
+}
+
+func (c *limitedConn) Write(p []byte) (int, error) {
+	if c.moveOnly.Load() {
+		line, complete := strings.CutSuffix(string(p), "\r\n")
+		_, cmd, tagged := strings.Cut(line, " ")
+		if !complete || !tagged || strings.ContainsAny(line, "\r\n") || (cmd != "CAPABILITY" && !strings.HasPrefix(cmd, "UID MOVE ")) {
+			_ = c.Conn.Close()
+			return 0, errors.New("non-native IMAP move blocked")
+		}
+	}
+	return c.Conn.Write(p)
+}
+
+type mailboxSession struct {
+	*imapclient.Client
+	wire *limitedConn
+}
+
+// The client library rechecks capabilities and can emulate MOVE with destructive
+// commands. Allow only the native command at the wire during this operation.
+func (m *mailboxSession) moveNative(set imap.UIDSet, destination string) (*imapclient.MoveData, error) {
+	m.wire.moveOnly.Store(true)
+	defer m.wire.moveOnly.Store(false)
+	return m.Move(set, destination).Wait()
 }
 
 func (c *limitedConn) Read(p []byte) (int, error) {
@@ -76,11 +104,25 @@ func (c *limitedConn) SetReadDeadline(t time.Time) error  { return c.Conn.SetRea
 func (c *limitedConn) SetWriteDeadline(t time.Time) error { return c.Conn.SetWriteDeadline(c.limit(t)) }
 
 func (s *mailService) withClient(ctx context.Context, name string, run func(*imapclient.Client) error) error {
+	return s.withMailbox(ctx, name, func(m *mailboxSession) error { return run(m.Client) })
+}
+
+func (s *mailService) withMailbox(ctx context.Context, name string, run func(*mailboxSession) error) error {
+	return s.withMailboxBudget(ctx, name, 22*time.Second, run)
+}
+
+func (s *mailService) withMailboxBudget(ctx context.Context, name string, budget time.Duration, run func(*mailboxSession) error) error {
 	a, ok := s.accounts[name]
 	if !ok {
 		return errors.New("unknown account; use list_accounts")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 22*time.Second)
+	select {
+	case s.sessions <- struct{}{}:
+		defer func() { <-s.sessions }()
+	case <-ctx.Done():
+		return errors.New("request time budget exhausted before opening mailbox")
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	deadline, _ := ctx.Deadline()
 	secret, err := a.credential(ctx)
@@ -109,7 +151,7 @@ func (s *mailService) withClient(ctx context.Context, name string, run func(*ima
 	if err != nil {
 		return errors.New("IMAP login failed; check account authorization and whether IMAP is enabled")
 	}
-	return run(client)
+	return run(&mailboxSession{Client: client, wire: limited})
 }
 
 func (a *mailboxAccount) credential(ctx context.Context) (string, error) {
@@ -165,23 +207,53 @@ func examine(c *imapclient.Client, folder string, validity uint32) (*imap.Select
 }
 
 type messageSummary struct {
-	UID      imap.UID `json:"uid"`
-	Subject  string   `json:"subject"`
-	From     []string `json:"from"`
-	Date     string   `json:"date,omitempty"`
-	Seen     bool     `json:"seen"`
-	Starred  bool     `json:"starred"`
-	Keywords []string `json:"keywords,omitempty"`
+	UID              imap.UID `json:"uid"`
+	Subject          string   `json:"subject"`
+	From             []string `json:"from"`
+	MessageID        string   `json:"message_id,omitempty"`
+	Date             string   `json:"date,omitempty"`
+	Seen             bool     `json:"seen"`
+	Starred          bool     `json:"starred"`
+	Keywords         []string `json:"keywords,omitempty"`
+	SummaryTruncated bool     `json:"summary_truncated,omitempty"`
 }
 
 func summarize(uid imap.UID, env *imap.Envelope) messageSummary {
 	out := messageSummary{UID: uid, From: []string{}}
-	if env != nil {
-		out.Subject = env.Subject
-		if !env.Date.IsZero() {
-			out.Date = env.Date.Format(time.RFC3339)
+	if env == nil {
+		return out
+	}
+	out.Subject = env.Subject
+	if len(out.Subject) > 1024 {
+		end := 1024
+		for !utf8.RuneStart(out.Subject[end]) && end > 0 {
+			end--
 		}
-		out.From = envelopeAddresses(env.From)
+		out.Subject = strings.Clone(out.Subject[:end])
+		out.SummaryTruncated = true
+	}
+	if !env.Date.IsZero() {
+		out.Date = env.Date.Format(time.RFC3339)
+	}
+	if env.MessageID != "" {
+		if cleanHeader(env.MessageID, 512) {
+			out.MessageID = "<" + env.MessageID + ">"
+		} else {
+			out.SummaryTruncated = true
+		}
+	}
+	for _, addr := range env.From {
+		if len(out.From) == 8 {
+			out.SummaryTruncated = true
+			break
+		}
+		if len(addr.Mailbox)+len(addr.Host) > 253 {
+			out.SummaryTruncated = true
+			continue
+		}
+		if value := addr.Addr(); value != "" {
+			out.From = append(out.From, value)
+		}
 	}
 	return out
 }
@@ -346,9 +418,11 @@ func selectBody(part imap.BodyStructure, path []int) (*imap.BodyStructureSingleP
 	return nil, nil
 }
 
-func hasSeen(flags []imap.Flag) bool {
+func hasSeen(flags []imap.Flag) bool { return hasMessageFlag(flags, imap.FlagSeen) }
+
+func hasMessageFlag(flags []imap.Flag, want imap.Flag) bool {
 	for _, flag := range flags {
-		if strings.EqualFold(string(flag), string(imap.FlagSeen)) {
+		if strings.EqualFold(string(flag), string(want)) {
 			return true
 		}
 	}

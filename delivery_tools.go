@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"net/mail"
+	"strings"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -49,6 +52,21 @@ func prepareForward(c *imapclient.Client, msg *outboundMessage, original *imapcl
 	}
 	if err != nil {
 		return err
+	}
+	originalMessage, err := mail.ReadMessage(bytes.NewReader(data))
+	if err != nil {
+		return errors.New("could not verify original message headers for forwarding")
+	}
+	for name, values := range originalMessage.Header {
+		name = strings.TrimRight(name, " \t")
+		if !strings.EqualFold(name, "Bcc") && !strings.EqualFold(name, "Resent-Bcc") {
+			continue
+		}
+		for _, value := range values {
+			if strings.TrimSpace(value) != "" {
+				return errors.New("cannot forward a complete original that contains blind-recipient headers")
+			}
+		}
 	}
 	subject := ""
 	if original.Envelope != nil {

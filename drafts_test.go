@@ -50,10 +50,11 @@ func (p draftPeer) expect(pattern string) (string, []string) {
 
 // The test drives the peer synchronously. The IMAP client runs concurrently and
 // closes its connection on completion, so missing or extra commands fail fast.
-func draftFixture(t *testing.T, caps string, call func(*imapclient.Client), script func(draftPeer)) {
+func draftFixture(t *testing.T, caps string, call func(*mailboxSession), script func(draftPeer)) {
 	t.Helper()
 	conn, peer := net.Pipe()
-	c := imapclient.New(conn, nil)
+	wire := &limitedConn{Conn: conn, deadline: time.Now().Add(5 * time.Second), remaining: maxIMAPBytes}
+	c := &mailboxSession{Client: imapclient.New(wire, nil), wire: wire}
 	done := make(chan struct{})
 	go func() { defer close(done); defer c.Close(); call(c) }()
 	defer func() { peer.Close(); <-done }()
@@ -75,7 +76,9 @@ func TestDraftAppend(t *testing.T) {
 			}
 			var id string
 			var out draftResult
-			draftFixture(t, "SPECIAL-USE LIST-EXTENDED", func(c *imapclient.Client) { out, err = saveDraft(c, account{FromAddress: "sender@example.org"}, msg) }, func(p draftPeer) {
+			draftFixture(t, "SPECIAL-USE LIST-EXTENDED", func(c *mailboxSession) {
+				out, err = saveDraft(c.Client, account{FromAddress: "sender@example.org"}, msg)
+			}, func(p draftPeer) {
 				tag, _ := p.expect(`LIST .*RETURN \(SPECIAL-USE\)`)
 				p.write(`* LIST (\Drafts) "/" "Unsent"` + "\r\n" + tag + " OK listed\r\n")
 				tag, m := p.expect(`APPEND "?Unsent"? \(\\Draft\) \{([0-9]+)\}`)
@@ -132,8 +135,8 @@ func TestDraftListDiscard(t *testing.T) {
 			var page draftPage
 			var out moveResult
 			var listErr, discardErr, wrongFolderErr error
-			draftFixture(t, caps, func(c *imapclient.Client) {
-				page, listErr = listDrafts(c, a, listDraftsInput{})
+			draftFixture(t, caps, func(c *mailboxSession) {
+				page, listErr = listDrafts(c.Client, a, listDraftsInput{})
 				if listErr != nil {
 					return
 				}
@@ -145,32 +148,19 @@ func TestDraftListDiscard(t *testing.T) {
 				selectReply := "* 1 EXISTS\r\n* OK [UIDVALIDITY 18] stable\r\n"
 				tag, _ := p.expect(`EXAMINE "?Unsent"?`)
 				p.write(selectReply + tag + " OK [READ-ONLY] examined\r\n")
-				tag, _ = p.expect(`UID SEARCH ALL`)
+				tag, _ = p.expect(`UID SEARCH DRAFT`)
 				p.write("* SEARCH 9\r\n" + tag + " OK found\r\n")
 				tag, _ = p.expect(`UID FETCH 9 \([A-Z ]+\)`)
 				p.write("* 1 FETCH (UID 9 FLAGS (\\Draft))\r\n" + tag + " OK fetched\r\n")
 				tag, _ = p.expect(`SELECT "?Unsent"?`)
 				p.write(selectReply + tag + " OK selected\r\n")
+				tag, _ = p.expect(`UID SEARCH UID 9 DRAFT`)
+				p.write("* SEARCH 9\r\n" + tag + " OK found\r\n")
 				if move {
-					tag, _ = p.expect(`UID SEARCH UID 9`)
-					p.write("* SEARCH 9\r\n" + tag + " OK found\r\n")
-
 					tag, _ = p.expect(`UID MOVE 9 "?Bin"?`)
 					p.write(tag + " OK moved\r\n")
-				} else {
-					// Either ordering of the non-mutating source UID check is safe.
-					line, err := p.r.ReadString('\n')
-					if err == nil {
-						tag, cmd, _ := strings.Cut(line, " ")
-						if cmd != "UID SEARCH UID 9\r\n" {
-							t.Fatalf("unexpected command without MOVE: %s", cmd)
-						}
-						p.write("* SEARCH 9\r\n" + tag + " OK found\r\n")
-						_, err = p.r.ReadString('\n')
-					}
-					if err != io.EOF {
-						t.Fatalf("unexpected fallback after SELECT: %v", err)
-					}
+				} else if line, err := p.r.ReadString('\n'); err != io.EOF {
+					t.Fatalf("unexpected fallback after SELECT: %q, %v", line, err)
 				}
 			})
 			if listErr != nil || page.Folder != "Unsent" || page.UIDValidity != 18 || len(page.Messages) != 1 || page.Messages[0].UID != 9 || page.Messages[0].Seen {

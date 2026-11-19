@@ -58,7 +58,7 @@ func folderName(name string) (string, error) {
 	if len(name) > 1024 || strings.ContainsAny(name, "\r\n\x00") {
 		return "", errors.New("invalid folder name")
 	}
-	if name == "" {
+	if name == "" || strings.EqualFold(name, "INBOX") {
 		name = "INBOX"
 	}
 	return name, nil

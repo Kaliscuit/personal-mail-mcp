@@ -42,7 +42,7 @@ chmod 700 secrets
 
 - `from_address` 默认等于 `username`。如果登录名不是完整邮箱，填写提供商允许的完整发件地址。iCloud 短用户名默认补 `@icloud.com` 用于 SMTP 登录和发信；其他 iCloud 地址建议写完整登录名。
 - 465 默认使用隐式 TLS，表中的 587 端点使用 STARTTLS。可用 `smtp_address` 和 `smtp_tls`（`implicit` 或 `starttls`）指定 SMTP 端点和加密模式；Outlook 只允许表中的两个 Microsoft SMTP 端点并强制 STARTTLS。两种模式都校验证书，不会回退到明文。
-- `archive_folder`、`trash_folder` 可填写 `list_folders` 返回的文件夹全名。未配置时，服务要求找到唯一的 `\Archive` 或 `\Trash` 特殊用途文件夹；服务商未标记对应文件夹时需要手动配置。服务不猜测英文目录名，不创建目录，也不回退到永久删除。整理操作需要服务商支持原生 IMAP MOVE。
+- `archive_folder`、`trash_folder`、`drafts_folder` 可填写 `list_folders` 返回的对应文件夹全名。未配置时，服务要求找到唯一的 `\Archive`、`\Trash`、`\Drafts` 特殊用途文件夹；服务不猜测本地化名称、不自动创建这些文件夹。移动（包括归档和移入废纸篓）要求原生 IMAP `MOVE`，不回退到可能永久删除邮件的操作。
 
 ### Outlook
 
@@ -77,29 +77,54 @@ chmod 700 secrets
 }
 ```
 
-配置格式因客户端而异；远程使用代理提供的 HTTPS URL。服务是无状态请求响应模式，不提供独立事件流。
+配置格式因客户端而异；远程使用代理提供的 HTTPS URL。所有查询由 agent 主动调用；没有后台轮询、新邮件通知或独立事件流。
 
 | 工具 | 用法 |
 | --- | --- |
 | `list_accounts` | 获取账号别名，不返回用户名或凭据。 |
 | `list_folders` | 按账号列出可打开的文件夹。 |
-| `search_messages` | 在指定账号和文件夹（默认 `INBOX`）内按 `from`、`subject`、`since`、`before` 查找。日期是到达日期，`since` 含当天，`before` 不含当天。不提供正文搜索。 |
-| `read_message` | 优先返回纯文本，其次是未渲染的 HTML；返回已读状态和原信声明的回复地址，不标记为已读。 |
+| `search_messages` | 在指定账号和文件夹（默认 `INBOX`）内筛选 `seen`、`starred`、`keyword`、`from`、`to`、`cc`、`subject`、`body`、`since`、`before`。日期是到达日期，`since` 含当天，`before` 不含当天。 |
+| `search_mailboxes` | 用相同条件查最多 8 个显式 `{account, folder}` 范围。每个范围单独返回结果、分页或错误。每范围默认 10 条，最多 20 条。 |
+| `get_mailbox_status` | 在 `scopes` 中指定 1–8 个 `{account, folder}`，返回各文件夹的邮件总数、未读数和 UIDVALIDITY。 |
+| `get_thread` | 指定一封邮件，按 `Message-ID`、`In-Reply-To`、`References` 查找确切关联；可指定同账号最多 3 个额外文件夹。结果含源文件夹与 UID，`truncated` 表示未查完。不根据主题猜测。 |
+| `read_message` | 优先返回纯文本，其次是未渲染的 HTML；返回已读状态、星标、可识别的 IMAP 关键词和原信声明的回复地址，不标记为已读。 |
 | `list_attachments` | 返回文件名、媒体类型、传输编码后的字节数和 `part`。 |
 | `download_attachment` | 传入 `part`，返回解码后文件的 `content_base64`；不改变已读状态。 |
 | `set_message_read` | 指定 `seen: true` 标记为已读，或 `seen: false` 标记为未读。 |
 | `move_message` | 指定同账号下已有的 `destination` 文件夹。 |
 | `archive_message` | 将邮件移到账号的归档文件夹。 |
 | `delete_message` | 仅移到废纸篓，不永久删除。 |
+| `copy_message` | 将一封邮件复制到同账号的另一个现有文件夹，保留原信。 |
+| `update_message_flags` | 传入同一文件夹的 `uids` 和 `uid_validity`，修改 `seen`、`starred` 或 `add_keywords`、`remove_keywords`。支持 1–50 个 UID，回读确认结果。 |
+| `move_messages` / `archive_messages` | 按一个源文件夹中的 1–50 个 UID 批量移动或归档。未确认的 UID 需重新查询，不要直接重试。 |
+| `create_folder` / `rename_folder` | 创建或重命名普通文件夹。重命名可能同时移动其子文件夹。 |
+| `retire_empty_folder` | 把已确认的空叶子文件夹重命名为可恢复的 `MCP-Retired-…` 文件夹，不执行 IMAP DELETE；可用 `rename_folder` 改回。 |
+| `save_draft` / `list_drafts` / `discard_draft` | 在草稿文件夹保存一封新的未发送邮件、分页列出草稿、或把指定草稿移到废纸篓。保存不会覆盖已有草稿，也不会发信。 |
 | `send_message` | 传入 `account`、`to`（地址数组）、`subject` 和纯文本 `body`；可选 `cc`、`bcc` 和 `attachments`。 |
 | `reply_message` | 传入原信标识与纯文本 `body`。使用原信的 Reply-To（没有则用 From），不回复全部，不自动引用原信正文；可附加文件。发送前用 `read_message` 核对 `reply_to`。 |
-| `forward_message` | 传入原信标识、`to` 和纯文本 `body`，可选 `cc`、`bcc` 和额外附件；完整原信作为 `original.eml` 附加发送。 |
+| `forward_message` | 传入原信标识、`to` 和纯文本 `body`，可选 `cc`、`bcc` 和额外附件；完整原信作为 `original.eml` 附加发送。含非空 `Bcc` 或 `Resent-Bcc` 头的原信拒绝转发，避免泄露密送人。 |
 
-搜索按 UID 降序分页，后续请求传上页的 `next_before_uid`（作为 `before_uid`）、`uid_validity` 和原搜索条件。每页最多 50 条。操作单封邮件时，使用搜索时的 `account` 和 `folder`，以及搜索返回的 `uid` 和 `uid_validity`；移动后需要在目标文件夹重新搜索，或使用服务商返回的目标 `uid` 和 `uid_validity`。
+例如 `search_messages` 传 `{"account":"personal-gmail","seen":false,"limit":10}` 直接查询未读，不用逐页读完再过滤。`seen` 和 `starred` 省略时不限状态。正文匹配由上游服务器完成；自定义关键词是标准 IMAP flags，不等同于 Gmail 标签。
+
+搜索按 UID 降序分页，后续请求传上页的 `next_before_uid`（作为 `before_uid`）、`uid_validity` 和原搜索条件。单文件夹每页最多 50 条；跨文件夹时把上述两个分页字段放到对应的 `scopes` 条目。摘要限制字段长度和列表大小，触及限制时返回 `summary_truncated`。草稿保存结果不明时，可用 `list_drafts` 返回的 `message_id` 核对，不要盲目重试。操作单封邮件时，使用搜索时的 `account` 和 `folder`，以及搜索返回的 `uid` 和 `uid_validity`；移动后需要在目标文件夹重新搜索，或使用服务商返回的目标 `uid` 和 `uid_validity`。
 
 发送附件格式为 `{"filename":"notes.txt","media_type":"text/plain","content_base64":"aGVsbG8="}`，`media_type` 可省略。单件下载的解码上限为 2 MiB，发送最多 10 件附件且总计 2 MiB；转发时的原始 `.eml` 也占用这两个限额。外发最多 25 名收件人，正文最多 64 KiB。SMTP 成功仅表示服务商接收；是否保留已发送副本取决于提供商。提交结果不明时，请先核对，不要直接重试。
 
 正文 MIME 部分超过 256 KiB 不下载；返回正文最多 64 KiB。每个 IMAP 请求最多读取 8 MiB 上游数据，MCP 请求体最多 4 MiB。邮件正文、回复地址和附件内容是不可信数据，不应被当作工具指令执行。
+
+## 供应商兼容性
+
+五个 IMAP 端点（Gmail 和 Google Workspace 共用）在未登录的 TLS `CAPABILITY` 检查中都声明了 IMAP4rev1。检索、`STATUS` 计数、复制、旗标、文件夹重命名和草稿 `APPEND` 使用标准 IMAP 命令；这确认了协议路径，不代表账号有对应权限，也不代表所有供应商的搜索或标签语义一致。
+
+| 供应商 | 登录前的观察与限制 |
+| --- | --- |
+| Gmail / Google Workspace | 未在本次响应中声明 `MOVE`。Gmail 的[官方扩展](https://developers.google.com/workspace/gmail/imap/imap-extensions)将标签呈现为文件夹，且提供独立的标签及线程 ID；本项目不将这些等同于标准 IMAP 关键词，也不依赖这些扩展。Workspace 组织策略另可能禁止 IMAP 或应用密码。 |
+| Outlook | 声明 `MOVE` 与 `UIDPLUS`；需要 OAuth2，并受管理员策略和邮箱权限限制。 |
+| Yahoo | 声明 `MOVE`、`UIDPLUS` 与 `SPECIAL-USE`。 |
+| iCloud | 未在本次响应中声明 `MOVE`，登录后的支持情况未实测。 |
+| QQ | 声明 `MOVE` 与 `UIDPLUS`。 |
+
+实际移动仅在当前 IMAP 会话支持原生 `MOVE` 时执行。没有账号级兼容性诊断工具；也未对真实邮箱执行写入、移动或删除验证。草稿等特殊用途文件夹未被服务商标记时可手工指定。批量标记只在文件夹声明所需标记可持久化时执行；工具回读后将 UID 标为 `confirmed` 或 `unconfirmed`。
 
 ## 容器
 

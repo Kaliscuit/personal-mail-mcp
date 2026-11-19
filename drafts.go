@@ -109,26 +109,27 @@ func listDrafts(c *imapclient.Client, a account, in listDraftsInput) (draftPage,
 	if err != nil {
 		return draftPage{}, err
 	}
+	criteria.Flag = append(criteria.Flag, imap.FlagDraft)
 	result, err := findMessages(c, q, criteria)
 	return draftPage{folder, result}, err
 }
 
-func discardDraft(c *imapclient.Client, a account, in messageInput) (moveResult, error) {
+func discardDraft(c *mailboxSession, a account, in messageInput) (moveResult, error) {
 	if err := in.validate(); err != nil {
 		return moveResult{}, err
 	}
-	folder, err := draftRoleFolder(c, a.DraftsFolder, imap.MailboxAttrDrafts)
+	folder, err := draftRoleFolder(c.Client, a.DraftsFolder, imap.MailboxAttrDrafts)
 	if err != nil {
 		return moveResult{}, err
 	}
-	if in.Folder != folder {
+	if !sameFolder(in.Folder, folder) {
 		return moveResult{}, errors.New("source folder must match this account's drafts folder")
 	}
-	dest, err := draftRoleFolder(c, a.TrashFolder, imap.MailboxAttrTrash)
+	dest, err := draftRoleFolder(c.Client, a.TrashFolder, imap.MailboxAttrTrash)
 	if err != nil {
 		return moveResult{}, err
 	}
-	return moveMessage(c, in, dest)
+	return moveMessage(c, in, dest, imap.FlagDraft)
 }
 
 func addDraftTools(s *mcp.Server, service *mailService) {
@@ -156,7 +157,7 @@ func addDraftTools(s *mcp.Server, service *mailService) {
 	})
 	mcp.AddTool(s, writeTool("discard_draft", "Move a draft to Trash using its folder, UID and UID validity from list_drafts. Never permanently deletes.", true, false, false), func(ctx context.Context, _ *mcp.CallToolRequest, in discardDraftInput) (*mcp.CallToolResult, moveResult, error) {
 		var out moveResult
-		err := service.withClient(ctx, in.Account, func(c *imapclient.Client) error {
+		err := service.withMailbox(ctx, in.Account, func(c *mailboxSession) error {
 			var err error
 			out, err = discardDraft(c, service.accounts[in.Account].account, messageInput(in))
 			return err

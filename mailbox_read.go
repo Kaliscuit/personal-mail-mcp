@@ -5,6 +5,7 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/emersion/go-imap/v2"
@@ -30,7 +31,11 @@ func setSummaryFlags(summary *messageSummary, flags []imap.Flag) {
 			summary.Starred = true
 		}
 		if keywordPattern.MatchString(string(flag)) {
-			summary.Keywords = append(summary.Keywords, string(flag))
+			if len(summary.Keywords) < 16 {
+				summary.Keywords = append(summary.Keywords, string(flag))
+			} else {
+				summary.SummaryTruncated = true
+			}
 		}
 	}
 }
@@ -52,12 +57,7 @@ func validateScopeList(n int) error {
 }
 
 func (s *mailService) withScope(ctx context.Context, scope mailboxScope, run func(*imapclient.Client) error) error {
-	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
-	defer cancel()
-	if ctx.Err() != nil {
-		return errors.New("request time budget exhausted before this scope")
-	}
-	return s.withClient(ctx, scope.Account, run)
+	return s.withMailboxBudget(ctx, scope.Account, 6*time.Second, func(m *mailboxSession) error { return run(m.Client) })
 }
 
 type mailboxStatus struct {
@@ -84,6 +84,25 @@ type scopedResults[T any] struct {
 	Scopes []scopedResult[T] `json:"scopes"`
 }
 
+func queryScopes[T any](ctx context.Context, items []mailboxScope, run func(context.Context, int, mailboxScope) (T, error)) scopedResults[T] {
+	out := scopedResults[T]{Scopes: make([]scopedResult[T], len(items))}
+	var wg sync.WaitGroup
+	for i, scope := range items {
+		wg.Go(func() {
+			item := scopedResult[T]{mailboxScope: scope}
+			result, err := run(ctx, i, scope)
+			if err == nil {
+				item.Result = &result
+			} else {
+				item.Error = err.Error()
+			}
+			out.Scopes[i] = item
+		})
+	}
+	wg.Wait()
+	return out
+}
+
 type searchScopesInput struct {
 	searchFilters
 	Scopes []struct {
@@ -102,23 +121,20 @@ func addMailboxReadTools(s *mcp.Server, service *mailService) {
 		if err := validateScopeList(len(in.Scopes)); err != nil {
 			return nil, out, err
 		}
-		for _, scope := range in.Scopes {
-			if err := scope.validate(); err != nil {
+		for i := range in.Scopes {
+			if err := in.Scopes[i].validate(); err != nil {
 				return nil, out, err
 			}
-			item := scopedResult[mailboxStatus]{mailboxScope: scope}
+		}
+		out = queryScopes(ctx, in.Scopes, func(ctx context.Context, _ int, scope mailboxScope) (mailboxStatus, error) {
+			var result mailboxStatus
 			err := service.withScope(ctx, scope, func(c *imapclient.Client) error {
-				result, err := readMailboxStatus(c, scope.Folder)
-				if err == nil {
-					item.Result = &result
-				}
+				var err error
+				result, err = readMailboxStatus(c, scope.Folder)
 				return err
 			})
-			if err != nil {
-				item.Error = err.Error()
-			}
-			out.Scopes = append(out.Scopes, item)
-		}
+			return result, err
+		})
 		return nil, out, nil
 	})
 	mcp.AddTool(s, readTool("search_mailboxes", "Search explicit accounts and folders with the same filters. Returns an independently paginated result or error for each folder."), func(ctx context.Context, _ *mcp.CallToolRequest, in searchScopesInput) (*mcp.CallToolResult, scopedResults[searchResult], error) {
@@ -136,6 +152,7 @@ func addMailboxReadTools(s *mcp.Server, service *mailService) {
 		if in.Limit < 1 || in.Limit > 20 {
 			return nil, out, errors.New("per-folder limit must be 1 to 20")
 		}
+		items := make([]mailboxScope, len(in.Scopes))
 		for i := range in.Scopes {
 			scope := &in.Scopes[i]
 			if err := scope.mailboxScope.validate(); err != nil {
@@ -144,22 +161,19 @@ func addMailboxReadTools(s *mcp.Server, service *mailService) {
 			if scope.BeforeUID != 0 && scope.UIDValidity == 0 {
 				return nil, out, errors.New("pagination requires uid_validity in each scope")
 			}
+			items[i] = scope.mailboxScope
 		}
-		for _, scope := range in.Scopes {
-			item := scopedResult[searchResult]{mailboxScope: scope.mailboxScope}
-			query := searchInput{mailboxScope: scope.mailboxScope, Limit: in.Limit, BeforeUID: scope.BeforeUID, UIDValidity: scope.UIDValidity}
-			err := service.withScope(ctx, scope.mailboxScope, func(c *imapclient.Client) error {
-				result, err := findMessages(c, query, criteria)
-				if err == nil {
-					item.Result = &result
-				}
+		out = queryScopes(ctx, items, func(ctx context.Context, i int, scope mailboxScope) (searchResult, error) {
+			cursor := in.Scopes[i]
+			query := searchInput{mailboxScope: scope, Limit: in.Limit, BeforeUID: cursor.BeforeUID, UIDValidity: cursor.UIDValidity}
+			var result searchResult
+			err := service.withScope(ctx, scope, func(c *imapclient.Client) error {
+				var err error
+				result, err = findMessages(c, query, criteria)
 				return err
 			})
-			if err != nil {
-				item.Error = err.Error()
-			}
-			out.Scopes = append(out.Scopes, item)
-		}
+			return result, err
+		})
 		return nil, out, nil
 	})
 }

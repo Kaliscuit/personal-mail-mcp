@@ -39,36 +39,39 @@ func (in *batchInput) validate() (messageInput, error) {
 	return messageInput{Account: in.Account, Folder: in.Folder, UIDValidity: in.UIDValidity}, nil
 }
 
-func verifiedUIDs(c *imapclient.Client, uids []imap.UID) (imap.UIDSet, error) {
+func verifiedUIDs(c *imapclient.Client, uids []imap.UID, flags ...imap.Flag) (imap.UIDSet, error) {
 	set := imap.UIDSetNum(uids...)
-	found, err := c.UIDSearch(&imap.SearchCriteria{UID: []imap.UIDSet{set}}, nil).Wait()
+	found, err := c.UIDSearch(&imap.SearchCriteria{UID: []imap.UIDSet{set}, Flag: flags}, nil).Wait()
 	if err != nil {
 		return nil, errors.New("could not verify the source messages")
 	}
 	existing, _ := found.All.(imap.UIDSet)
 	for _, uid := range uids {
 		if !existing.Contains(uid) {
-			return nil, errors.New("at least one source message is missing; search the folder again")
+			return nil, errors.New("at least one source message is missing or does not have the required flags; search again")
 		}
 	}
 	return set, nil
 }
 
-func moveSet(c *imapclient.Client, source messageInput, uids []imap.UID, destination string) (*imapclient.MoveData, error) {
+func moveSet(c *mailboxSession, source messageInput, uids []imap.UID, destination string, flags ...imap.Flag) (*imapclient.MoveData, error) {
+	if _, err := explicitFolder(destination); err != nil {
+		return nil, err
+	}
 	if sameFolder(source.Folder, destination) {
 		return nil, errors.New("source and destination must be different folders")
 	}
-	if err := selectForWrite(c, source); err != nil {
+	if _, err := selectWritable(c.Client, source); err != nil {
+		return nil, err
+	}
+	set, err := verifiedUIDs(c.Client, uids, flags...)
+	if err != nil {
 		return nil, err
 	}
 	if !c.Caps().Has(imap.CapMove) {
 		return nil, errors.New("mail server does not support safe IMAP MOVE")
 	}
-	set, err := verifiedUIDs(c, uids)
-	if err != nil {
-		return nil, err
-	}
-	data, err := c.Move(set, destination).Wait()
+	data, err := c.moveNative(set, destination)
 	if err != nil {
 		return nil, errors.New("move was not confirmed; check both folders before retrying")
 	}
@@ -151,22 +154,26 @@ func (in flagBatchInput) flags() (flagUpdate, error) {
 }
 
 func (update flagUpdate) matches(flags []imap.Flag) bool {
-	hasFlag := func(wanted imap.Flag) bool {
-		for _, flag := range flags {
-			if strings.EqualFold(string(wanted), string(flag)) {
-				return true
-			}
-		}
-		return false
-	}
 	for _, flag := range update.add {
-		if !hasFlag(flag) {
+		if !hasMessageFlag(flags, flag) {
 			return false
 		}
 	}
 	for _, flag := range update.remove {
-		if hasFlag(flag) {
+		if hasMessageFlag(flags, flag) {
 			return false
+		}
+	}
+	return true
+}
+
+func (update flagUpdate) permanent(flags []imap.Flag) bool {
+	wildcard := hasMessageFlag(flags, imap.FlagWildcard)
+	for _, group := range [][]imap.Flag{update.add, update.remove} {
+		for _, flag := range group {
+			if !hasMessageFlag(flags, flag) && !(wildcard && keywordPattern.MatchString(string(flag))) {
+				return false
+			}
 		}
 	}
 	return true
@@ -190,8 +197,12 @@ func confirmUIDs(uids []imap.UID, confirmed func(imap.UID) bool) uidConfirmation
 }
 
 func updateFlags(c *imapclient.Client, source messageInput, uids []imap.UID, update flagUpdate) (uidConfirmation, error) {
-	if err := selectForWrite(c, source); err != nil {
+	selected, err := selectWritable(c, source)
+	if err != nil {
 		return uidConfirmation{}, err
+	}
+	if !update.permanent(selected.PermanentFlags) {
+		return uidConfirmation{}, errors.New("mailbox did not advertise permanent support for all requested flags")
 	}
 	set, err := verifiedUIDs(c, uids)
 	if err != nil {
@@ -260,12 +271,12 @@ func addOrganizeTools(s *mcp.Server, service *mailService) {
 		if err != nil {
 			return nil, out, err
 		}
-		err = service.withClient(ctx, in.Account, func(c *imapclient.Client) error {
+		err = service.withMailbox(ctx, in.Account, func(c *mailboxSession) error {
 			if destination == "" {
 				destination = service.accounts[in.Account].ArchiveFolder
 				if destination == "" {
 					var err error
-					destination, err = specialFolder(c, imap.MailboxAttrArchive)
+					destination, err = specialFolder(c.Client, imap.MailboxAttrArchive)
 					if err != nil {
 						return err
 					}

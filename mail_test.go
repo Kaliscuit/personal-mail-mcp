@@ -70,7 +70,9 @@ func TestIMAPReadAndWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := imapclient.New(&limitedConn{Conn: conn, remaining: maxIMAPBytes, deadline: time.Now().Add(5 * time.Second)}, nil)
+	wire := &limitedConn{Conn: conn, remaining: maxIMAPBytes, deadline: time.Now().Add(5 * time.Second)}
+	c := imapclient.New(wire, nil)
+	session := &mailboxSession{Client: c, wire: wire}
 	defer c.Close()
 	if err := c.Login("reader", "test-only").Wait(); err != nil {
 		t.Fatal(err)
@@ -161,7 +163,11 @@ func TestIMAPReadAndWrite(t *testing.T) {
 	if err != nil || len(match.Messages) != 1 || match.Messages[0].UID != 3 || !match.Messages[0].Starred || match.Messages[0].Seen || match.NextBeforeUID != 0 {
 		t.Fatalf("filtered search: %+v, %v", match, err)
 	}
-	counts, err := readMailboxStatus(c, "INBOX")
+	scope := mailboxScope{Account: "fixture", Folder: "inbox"}
+	if err := scope.validate(); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := readMailboxStatus(c, scope.Folder)
 	if err != nil || counts.Messages != 3 || counts.Unseen != 2 || counts.UIDValidity != page.UIDValidity {
 		t.Fatalf("folder counts: %+v, %v", counts, err)
 	}
@@ -169,13 +175,13 @@ func TestIMAPReadAndWrite(t *testing.T) {
 	if _, err := specialFolder(c, imap.MailboxAttrTrash); err == nil {
 		t.Fatal("unexpected trash folder")
 	}
-	if _, err := moveMessage(c, bad, archive); err == nil {
+	if _, err := moveMessage(session, bad, archive); err == nil {
 		t.Fatal("stale UID validity accepted for MOVE")
 	}
-	if moved, err := moveMessage(c, message, archive); err != nil || moved.Destination != archive {
+	if moved, err := moveMessage(session, message, archive); err != nil || moved.Destination != archive {
 		t.Fatalf("move: %+v, %v", moved, err)
 	}
-	if _, err := moveMessage(c, message, archive); err == nil {
+	if _, err := moveMessage(session, message, archive); err == nil {
 		t.Fatal("missing message accepted for MOVE")
 	}
 	q.Folder, q.UIDValidity = archive, 0
@@ -200,6 +206,12 @@ func TestIMAPReadAndWrite(t *testing.T) {
 	}
 	source := messageInput{Folder: "INBOX", UID: 1, UIDValidity: page.UIDValidity}
 	uids := []imap.UID{1, 2}
+	if _, err := c.Select("INBOX", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Store(imap.UIDSetNum(2), &imap.StoreFlags{Op: imap.StoreFlagsAdd, Flags: []imap.Flag{imap.FlagFlagged}}, nil).Collect(); err != nil {
+		t.Fatal(err)
+	}
 	changes, err := (flagBatchInput{Seen: &unread, Starred: &starred, AddKeywords: []string{"project-abc"}}).flags()
 	if err != nil {
 		t.Fatal(err)
@@ -215,16 +227,55 @@ func TestIMAPReadAndWrite(t *testing.T) {
 	if err := changeFolder(c, "Reading", "ShouldKeep", true, nil); err == nil {
 		t.Fatal("retired a non-empty folder")
 	}
-	if _, err := moveSet(c, source, []imap.UID{1, 99}, archive); err == nil {
+	if _, err := moveSet(session, source, []imap.UID{1, 99}, archive); err == nil {
 		t.Fatal("batch move should reject a missing source before moving anything")
 	}
-	if _, err := moveSet(c, source, uids, archive); err != nil {
+	if _, err := moveSet(session, source, uids, archive); err != nil {
 		t.Fatal(err)
 	}
 	for folder, want := range map[string]uint32{"INBOX": 0, "Archive": 3, "Reading": 1, "MCP-Retired-test": 0} {
 		status, err := readMailboxStatus(c, folder)
 		if err != nil || status.Messages != want {
 			t.Fatalf("counts %s: %+v, %v", folder, status, err)
+		}
+	}
+	if err := c.Create("Drafts", nil).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := (saveDraftInput{Bcc: []string{"blind@example.net"}, composition: composition{Body: "draft"}}).message()
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft, err := saveDraft(c, account{FromAddress: "reader@example.net", DraftsFolder: "Drafts"}, msg)
+	if err != nil || draft.UID == 0 || draft.UIDValidity == 0 {
+		t.Fatalf("draft: %+v, %v", draft, err)
+	}
+	draftRef := messageInput{Folder: draft.Folder, UID: draft.UID, UIDValidity: draft.UIDValidity}
+	draftCopy, err := copyMessage(c, draftRef, "Reading")
+	if err != nil || draftCopy.UID == 0 {
+		t.Fatalf("draft copy: %+v, %v", draftCopy, err)
+	}
+	draftMeta, err := messageMetadata(c, messageInput{Folder: "Reading", UID: draftCopy.UID, UIDValidity: draftCopy.UIDValidity})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blindForward outboundMessage
+	if err := prepareForward(c, &blindForward, draftMeta); err == nil || !strings.Contains(err.Error(), "blind-recipient") || len(blindForward.attachments) != 0 {
+		t.Fatalf("saved draft Bcc not protected when forwarding a copy: %v", err)
+	}
+	for _, field := range []string{"bCc \t", "Resent-Bcc "} {
+		msg := field + ": private@example.net\r\n" + strings.ReplaceAll(exampleMessage, "\n", "\r\n")
+		data, err := u.Append("Reading", sizedReader{strings.NewReader(msg)}, &imap.AppendOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		meta, err := messageMetadata(c, messageInput{Folder: "Reading", UID: data.UID, UIDValidity: data.UIDValidity})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var forward outboundMessage
+		if err := prepareForward(c, &forward, meta); err == nil || !strings.Contains(err.Error(), "blind-recipient") || len(forward.attachments) != 0 {
+			t.Fatalf("unprotected %q forwarding: %v", field, err)
 		}
 	}
 }

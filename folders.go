@@ -32,7 +32,9 @@ func managedFolder(name string) (string, error) {
 func hasSpecialUse(attrs []imap.MailboxAttr) bool {
 	for _, a := range attrs {
 		switch strings.ToLower(string(a)) {
-		case `\all`, `\archive`, `\drafts`, `\flagged`, `\important`, `\junk`, `\sent`, `\trash`:
+		case `\haschildren`, `\hasnochildren`, `\noinferiors`, `\noselect`, `\nonexistent`, `\marked`, `\unmarked`, `\subscribed`, `\remote`:
+			continue
+		default:
 			return true
 		}
 	}
