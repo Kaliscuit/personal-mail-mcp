@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!dist/
+dist/*
+!dist/ca-certificates.crt
+!dist/personal-mail-mcp-linux-amd64
+!dist/personal-mail-mcp-linux-arm64

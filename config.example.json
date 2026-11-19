@@ -1,0 +1,12 @@
+{
+  "interfaces": ["lo"],
+  "port": 8080,
+  "token_file": "secrets/mcp-token",
+  "accounts": {
+    "personal-gmail": {
+      "provider": "gmail",
+      "username": "you@gmail.com",
+      "password_file": "secrets/personal-gmail"
+    }
+  }
+}
