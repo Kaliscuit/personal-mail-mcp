@@ -1,0 +1,34 @@
+{
+  "interfaces": ["lo"],
+  "port": 8080,
+  "token_file": "secrets/mcp-token",
+  "accounts": {
+    "personal-gmail": {
+      "provider": "gmail",
+      "username": "gmail@example.test",
+      "password_file": "secrets/personal-gmail"
+    },
+    "work-google": {
+      "provider": "workspace",
+      "username": "workspace@example.test",
+      "password_file": "secrets/work-google"
+    },
+    "personal-yahoo": {
+      "provider": "yahoo",
+      "username": "yahoo@example.test",
+      "password_file": "secrets/personal-yahoo"
+    },
+    "personal-qq": {
+      "provider": "qq",
+      "username": "qq@example.test",
+      "password_file": "secrets/personal-qq"
+    },
+    "personal-outlook": {
+      "provider": "outlook",
+      "username": "outlook@example.test",
+      "client_id": "YOUR_APPLICATION_CLIENT_ID",
+      "tenant": "consumers",
+      "oauth_file": "secrets/personal-outlook.json"
+    }
+  }
+}
